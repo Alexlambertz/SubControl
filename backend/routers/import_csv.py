@@ -35,11 +35,14 @@ _EXPORT_COLUMNS = [
 ]
 
 
+_MAX_CSV_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
 @router.post("/api/buckets/{bucket_id}/subscriptions/import")
 async def import_subscriptions(
     bucket_id: str,
     file: UploadFile,
-    _user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ) -> dict:
     """
@@ -51,7 +54,19 @@ async def import_subscriptions(
         if await cur.fetchone() is None:
             raise HTTPException(status_code=404, detail="Bucket not found")
 
-    content = await file.read()
+    # Enforce bucket membership for non-admins
+    if not user.is_admin:
+        async with db.execute(
+            "SELECT 1 FROM user_buckets WHERE user_id = ? AND bucket_id = ?",
+            (user.id, bucket_id),
+        ) as cur:
+            if await cur.fetchone() is None:
+                raise HTTPException(status_code=403, detail="Access denied to this bucket")
+
+    # Reject oversized uploads before parsing
+    content = await file.read(_MAX_CSV_BYTES + 1)
+    if len(content) > _MAX_CSV_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (max 10 MB)")
 
     from backend.services.csv_import import import_subscriptions_from_csv
 
@@ -77,7 +92,7 @@ async def import_subscriptions(
 @router.post("/api/buckets/{bucket_id}/subscriptions/refresh-logos")
 async def refresh_subscription_logos(
     bucket_id: str,
-    _user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ) -> dict:
     """
@@ -88,6 +103,14 @@ async def refresh_subscription_logos(
     async with db.execute("SELECT id FROM buckets WHERE id = ?", (bucket_id,)) as cur:
         if await cur.fetchone() is None:
             raise HTTPException(status_code=404, detail="Bucket not found")
+
+    if not user.is_admin:
+        async with db.execute(
+            "SELECT 1 FROM user_buckets WHERE user_id = ? AND bucket_id = ?",
+            (user.id, bucket_id),
+        ) as cur:
+            if await cur.fetchone() is None:
+                raise HTTPException(status_code=403, detail="Access denied to this bucket")
 
     async with db.execute(
         "SELECT COUNT(*) AS n FROM subscriptions WHERE bucket_id = ?", (bucket_id,)
@@ -109,7 +132,7 @@ async def refresh_subscription_logos(
 @router.get("/api/buckets/{bucket_id}/subscriptions/export")
 async def export_subscriptions(
     bucket_id: str,
-    _user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ) -> StreamingResponse:
     """
@@ -122,6 +145,14 @@ async def export_subscriptions(
         bucket_row = await cur.fetchone()
     if bucket_row is None:
         raise HTTPException(status_code=404, detail="Bucket not found")
+
+    if not user.is_admin:
+        async with db.execute(
+            "SELECT 1 FROM user_buckets WHERE user_id = ? AND bucket_id = ?",
+            (user.id, bucket_id),
+        ) as cur:
+            if await cur.fetchone() is None:
+                raise HTTPException(status_code=403, detail="Access denied to this bucket")
 
     bucket_name = bucket_row["name"]
 

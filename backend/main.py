@@ -17,10 +17,11 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from backend.config import settings
 from backend.database import DB_PATH
@@ -41,6 +42,15 @@ logger = logging.getLogger(__name__)
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
 
+    # ------------------------------------------------------------------
+    # Safety check — refuse to start in production with the default key
+    # ------------------------------------------------------------------
+    if not settings.dev_mode and settings.secret_key == "change-me-in-production":
+        raise RuntimeError(
+            "SECRET_KEY must be changed from the default value before running in production. "
+            "Set the SECRET_KEY environment variable."
+        )
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[type-arg]
         """Run startup tasks before serving requests."""
@@ -60,21 +70,45 @@ def create_app() -> FastAPI:
         description="Subscription management REST API",
         version=_read_version(),
         lifespan=lifespan,
-        docs_url="/api/docs",
-        redoc_url="/api/redoc",
-        openapi_url="/api/openapi.json",
+        docs_url="/api/docs" if settings.dev_mode else None,
+        redoc_url="/api/redoc" if settings.dev_mode else None,
+        openapi_url="/api/openapi.json" if settings.dev_mode else None,
     )
 
     # ------------------------------------------------------------------
-    # CORS — allow the Vite dev server and the production origin
+    # CORS — dev allows Vite; production reads FRONTEND_ORIGIN env var
     # ------------------------------------------------------------------
+    if settings.dev_mode:
+        cors_origins = ["http://localhost:5173", "http://localhost:3000"]
+    else:
+        frontend_origin = settings.frontend_origin
+        cors_origins = [frontend_origin] if frontend_origin else []
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://localhost:3000"],
+        allow_origins=cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
     )
+
+    # ------------------------------------------------------------------
+    # Security headers
+    # ------------------------------------------------------------------
+    class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):  # type: ignore[override]
+            response: Response = await call_next(request)
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["X-Frame-Options"] = "DENY"
+            response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+            response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+            if not settings.dev_mode:
+                response.headers["Strict-Transport-Security"] = (
+                    "max-age=31536000; includeSubDomains"
+                )
+            return response
+
+    app.add_middleware(SecurityHeadersMiddleware)
 
     # ------------------------------------------------------------------
     # API routers

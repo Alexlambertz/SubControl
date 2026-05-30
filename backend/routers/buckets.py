@@ -77,14 +77,27 @@ async def _get_bucket_or_404(bucket_id: str, db: aiosqlite.Connection) -> dict:
 
 @router.get("", response_model=list[BucketResponse])
 async def list_buckets(
-    _user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ) -> list[BucketResponse]:
-    """Return all buckets (admin sees all; regular users see their assigned buckets)."""
-    async with db.execute(
-        "SELECT id, name, created_at FROM buckets ORDER BY name"
-    ) as cur:
-        rows = await cur.fetchall()
+    """Return buckets the user is assigned to (admins see all buckets)."""
+    if user.is_admin:
+        async with db.execute(
+            "SELECT id, name, created_at FROM buckets ORDER BY name"
+        ) as cur:
+            rows = await cur.fetchall()
+    else:
+        async with db.execute(
+            """
+            SELECT b.id, b.name, b.created_at
+            FROM buckets b
+            JOIN user_buckets ub ON ub.bucket_id = b.id
+            WHERE ub.user_id = ?
+            ORDER BY b.name
+            """,
+            (user.id,),
+        ) as cur:
+            rows = await cur.fetchall()
     return [BucketResponse(**dict(r)) for r in rows]
 
 

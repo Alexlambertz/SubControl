@@ -44,6 +44,7 @@ async def chat_message(
             db_path,
             history,
             csv_content=payload.csv_content,
+            is_admin=current_user.is_admin,
         ),
         media_type="text/event-stream",
         headers={

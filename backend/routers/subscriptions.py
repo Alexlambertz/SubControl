@@ -114,6 +114,20 @@ async def _get_bucket_or_404(bucket_id: str, db: aiosqlite.Connection) -> None:
             raise HTTPException(status_code=404, detail="Bucket not found")
 
 
+async def _check_bucket_access(
+    bucket_id: str, user: "CurrentUser", db: aiosqlite.Connection
+) -> None:
+    """Raise 403 if *user* is not assigned to *bucket_id* (admins always pass)."""
+    if user.is_admin:
+        return
+    async with db.execute(
+        "SELECT 1 FROM user_buckets WHERE user_id = ? AND bucket_id = ?",
+        (user.id, bucket_id),
+    ) as cur:
+        if await cur.fetchone() is None:
+            raise HTTPException(status_code=403, detail="Access denied to this bucket")
+
+
 async def _get_sub_or_404(
     bucket_id: str, sub_id: str, db: aiosqlite.Connection
 ) -> dict:
@@ -202,10 +216,11 @@ async def _update_logo(sub_id: str, provider_name: str, db_path: str) -> None:
 )
 async def list_subscriptions(
     bucket_id: str,
-    _user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ) -> list[SubscriptionResponse]:
     await _get_bucket_or_404(bucket_id, db)
+    await _check_bucket_access(bucket_id, user, db)
     async with db.execute(
         """
         SELECT s.id, s.bucket_id, s.name,
@@ -234,10 +249,11 @@ async def list_subscriptions(
 async def create_subscription(
     bucket_id: str,
     body: SubscriptionCreate,
-    _user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ) -> SubscriptionResponse:
     await _get_bucket_or_404(bucket_id, db)
+    await _check_bucket_access(bucket_id, user, db)
 
     provider_id = await _get_or_create_provider(body.provider_name, db)
     category_id = (
@@ -292,9 +308,10 @@ async def create_subscription(
 async def get_subscription(
     bucket_id: str,
     sub_id: str,
-    _user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ) -> SubscriptionResponse:
+    await _check_bucket_access(bucket_id, user, db)
     return SubscriptionResponse(**await _get_sub_or_404(bucket_id, sub_id, db))
 
 
@@ -306,9 +323,10 @@ async def update_subscription(
     bucket_id: str,
     sub_id: str,
     body: SubscriptionUpdate,
-    _user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ) -> SubscriptionResponse:
+    await _check_bucket_access(bucket_id, user, db)
     existing = await _get_sub_or_404(bucket_id, sub_id, db)
 
     # Resolve provider
@@ -390,9 +408,10 @@ async def update_subscription(
 async def delete_subscription(
     bucket_id: str,
     sub_id: str,
-    _user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ) -> None:
+    await _check_bucket_access(bucket_id, user, db)
     await _get_sub_or_404(bucket_id, sub_id, db)
     await db.execute("DELETE FROM subscriptions WHERE id = ?", (sub_id,))
     await db.commit()

@@ -209,15 +209,32 @@ async def _get_settings(db: aiosqlite.Connection) -> dict[str, str]:
     return {row[0]: row[1] for row in rows}
 
 
-async def _get_buckets(db: aiosqlite.Connection) -> list[dict[str, Any]]:
-    cursor = await db.execute("SELECT id, name FROM buckets ORDER BY name")
+async def _get_buckets(db: aiosqlite.Connection, user_id: str, is_admin: bool) -> list[dict[str, Any]]:
+    if is_admin:
+        cursor = await db.execute("SELECT id, name FROM buckets ORDER BY name")
+    else:
+        cursor = await db.execute(
+            """
+            SELECT b.id, b.name FROM buckets b
+            JOIN user_buckets ub ON ub.bucket_id = b.id
+            WHERE ub.user_id = ?
+            ORDER BY b.name
+            """,
+            (user_id,),
+        )
     rows = await cursor.fetchall()
     return [{"id": row[0], "name": row[1]} for row in rows]
 
 
-async def _get_subscriptions(db: aiosqlite.Connection) -> list[dict[str, Any]]:
+async def _get_subscriptions(db: aiosqlite.Connection, user_id: str, is_admin: bool) -> list[dict[str, Any]]:
+    if is_admin:
+        access_filter = ""
+        params: tuple = ()
+    else:
+        access_filter = "AND s.bucket_id IN (SELECT bucket_id FROM user_buckets WHERE user_id = ?)"
+        params = (user_id,)
     cursor = await db.execute(
-        """
+        f"""
         SELECT s.id, s.bucket_id, b.name AS bucket_name,
                s.name, p.name AS provider_name, s.recurring_interval,
                s.amount, s.currency, c.name AS category_name
@@ -225,8 +242,10 @@ async def _get_subscriptions(db: aiosqlite.Connection) -> list[dict[str, Any]]:
         JOIN buckets b ON b.id = s.bucket_id
         LEFT JOIN providers p ON p.id = s.provider_id
         LEFT JOIN categories c ON c.id = s.category_id
+        WHERE 1=1 {access_filter}
         ORDER BY b.name, s.name
-        """
+        """,
+        params,
     )
     rows = await cursor.fetchall()
     cols = [d[0] for d in cursor.description]
@@ -635,6 +654,7 @@ async def stream_chat_response(
     db_path: str,
     history: list[dict[str, str]] | None = None,
     csv_content: str | None = None,
+    is_admin: bool = False,
 ) -> AsyncGenerator[str, None]:
     """
     Stream chat response as SSE data lines.
@@ -655,8 +675,8 @@ async def stream_chat_response(
     try:
         async with aiosqlite.connect(db_path) as db:
             db_settings = await _get_settings(db)
-            buckets = await _get_buckets(db)
-            subscriptions = await _get_subscriptions(db)
+            buckets = await _get_buckets(db, user_id, is_admin)
+            subscriptions = await _get_subscriptions(db, user_id, is_admin)
     except Exception as exc:
         logger.exception("Failed to read DB context for AI chat")
         yield f'data: {json.dumps({"content": f"⚠️ Could not load data: {exc}"})}\n\n'

@@ -70,7 +70,7 @@ async def get_dashboard(
     ),
     bucket_id: Optional[str] = Query(None),
     category_id: Optional[int] = Query(None),
-    _user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ) -> DashboardResponse:
     """Return the dashboard cost summary."""
@@ -85,11 +85,25 @@ async def get_dashboard(
                 status_code=422, detail="'month' must be in YYYY-MM format"
             )
 
-    # Build dynamic WHERE clause
-    conditions = ["1=1"]
+    # Build dynamic WHERE clause — always scope to the user's accessible buckets
+    conditions: list[str] = []
     params: list = []
 
+    if not user.is_admin:
+        conditions.append(
+            "s.bucket_id IN (SELECT bucket_id FROM user_buckets WHERE user_id = ?)"
+        )
+        params.append(user.id)
+
     if bucket_id:
+        # Verify the user actually has access to this specific bucket
+        if not user.is_admin:
+            async with db.execute(
+                "SELECT 1 FROM user_buckets WHERE user_id = ? AND bucket_id = ?",
+                (user.id, bucket_id),
+            ) as cur:
+                if await cur.fetchone() is None:
+                    raise HTTPException(status_code=403, detail="Access denied to this bucket")
         conditions.append("s.bucket_id = ?")
         params.append(bucket_id)
 
@@ -97,7 +111,7 @@ async def get_dashboard(
         conditions.append("s.category_id = ?")
         params.append(category_id)
 
-    where = " AND ".join(conditions)
+    where = " AND ".join(conditions) if conditions else "1=1"
 
     async with db.execute(
         f"""
@@ -150,7 +164,7 @@ class YearlyDashboardResponse(BaseModel):
 async def get_yearly_dashboard(
     year: int = Query(..., ge=2000, le=2100, description="Four-digit year"),
     bucket_id: Optional[str] = Query(None),
-    _user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
 ) -> YearlyDashboardResponse:
     """
@@ -159,12 +173,27 @@ async def get_yearly_dashboard(
     Subscriptions are fetched once and the real-monthly calculation is
     applied 12 times (one per calendar month) in Python — no 12× DB round-trips.
     """
-    conditions = ["1=1"]
+    conditions: list[str] = []
     params: list = []
+
+    if not user.is_admin:
+        conditions.append(
+            "s.bucket_id IN (SELECT bucket_id FROM user_buckets WHERE user_id = ?)"
+        )
+        params.append(user.id)
+
     if bucket_id:
+        if not user.is_admin:
+            async with db.execute(
+                "SELECT 1 FROM user_buckets WHERE user_id = ? AND bucket_id = ?",
+                (user.id, bucket_id),
+            ) as cur:
+                if await cur.fetchone() is None:
+                    raise HTTPException(status_code=403, detail="Access denied to this bucket")
         conditions.append("s.bucket_id = ?")
         params.append(bucket_id)
-    where = " AND ".join(conditions)
+
+    where = " AND ".join(conditions) if conditions else "1=1"
 
     async with db.execute(
         f"""

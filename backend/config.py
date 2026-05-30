@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     secret_key: str = "change-me-in-production"
     """Used for signing internal tokens (not Keycloak JWTs)."""
 
+    frontend_origin: str = ""
+    """
+    Production URL of the React frontend, e.g. 'https://subcontrol.example.com'.
+    Used to configure CORS in production.  Ignored in DEV_MODE.
+    """
+
     # OIDC / Keycloak
     oidc_issuer_url: str = "http://localhost:8080/realms/subcontrol"
     """Issuer URL used by the *backend* to fetch JWKS and validate tokens."""

@@ -11,11 +11,14 @@ More importers can be added here as additional POST endpoints under /api/import/
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import socket
+from urllib.parse import urlparse
 
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, HttpUrl, field_validator
+from pydantic import BaseModel, field_validator
 
 from backend.database import get_db
 from backend.dependencies import CurrentUser, get_current_user
@@ -44,6 +47,24 @@ class WallosImportRequest(BaseModel):
             raise ValueError("url must not be empty")
         if not v.startswith(("http://", "https://")):
             raise ValueError("url must start with http:// or https://")
+        # SSRF guard — block private/loopback/link-local addresses
+        parsed = urlparse(v)
+        hostname = parsed.hostname or ""
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+                raise ValueError("Private or internal IP addresses are not allowed")
+        except ValueError as exc:
+            # Not an IP literal — resolve hostname to check
+            if "not allowed" in str(exc):
+                raise
+            try:
+                ip_str = socket.gethostbyname(hostname)
+                addr = ipaddress.ip_address(ip_str)
+                if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+                    raise ValueError("URL resolves to a private or internal address")
+            except socket.gaierror:
+                pass  # DNS will fail later; let httpx handle it
         return v
 
     @field_validator("api_key")
@@ -78,6 +99,15 @@ async def import_from_wallos(
     ) as cur:
         if await cur.fetchone() is None:
             raise HTTPException(status_code=404, detail="Bucket not found")
+
+    # Enforce bucket membership for non-admins
+    if not _user.is_admin:
+        async with db.execute(
+            "SELECT 1 FROM user_buckets WHERE user_id = ? AND bucket_id = ?",
+            (_user.id, body.bucket_id),
+        ) as cur:
+            if await cur.fetchone() is None:
+                raise HTTPException(status_code=403, detail="Access denied to this bucket")
 
     from backend.services.wallos_import import import_from_wallos
 
