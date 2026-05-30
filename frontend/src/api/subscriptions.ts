@@ -1,4 +1,4 @@
-import { get, post, put, del, postFormData } from './client'
+import { get, post, put, del, postFormData, getBlob } from './client'
 import type { Subscription, ImportResult } from '../types'
 
 export interface SubscriptionPayload {
@@ -33,11 +33,7 @@ export const subscriptionsApi = {
   },
 
   exportCsv: async (bucketId: string, bucketName: string): Promise<void> => {
-    const res = await fetch(`/api/buckets/${bucketId}/subscriptions/export`, {
-      credentials: 'include',
-    })
-    if (!res.ok) throw new Error(`Export failed: ${res.status}`)
-    const blob = await res.blob()
+    const blob = await getBlob(`/buckets/${bucketId}/subscriptions/export`)
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url

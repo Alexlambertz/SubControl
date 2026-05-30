@@ -90,6 +90,17 @@ export async function del<T>(path: string): Promise<T> {
   return handleResponse<T>(res)
 }
 
+/** GET a binary response (e.g. CSV download) with the Bearer token attached. */
+export async function getBlob(path: string): Promise<Blob> {
+  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() })
+  if (!res.ok) {
+    let detail = res.statusText
+    try { detail = (await res.json()).detail ?? detail } catch { /* ignore */ }
+    throw new Error(`API ${res.status}: ${detail}`)
+  }
+  return res.blob()
+}
+
 export async function postFormData<T>(path: string, formData: FormData): Promise<T> {
   const headers: Record<string, string> = {}
   if (_accessToken) {
