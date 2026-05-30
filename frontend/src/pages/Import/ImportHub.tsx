@@ -8,19 +8,20 @@
 
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { FileText, Globe, Upload, CheckCircle, AlertCircle } from 'lucide-react'
+import { FileText, Globe, Upload, Download, CheckCircle, AlertCircle } from 'lucide-react'
 import { bucketsApi } from '../../api/buckets'
 import { subscriptionsApi } from '../../api/subscriptions'
 import WallosImport from './WallosImport'
 import type { ImportResult } from '../../types'
 
 // ---------------------------------------------------------------------------
-// Tab definition — extend here for future importers
+// Tab definition — extend here for future importers/exporters
 // ---------------------------------------------------------------------------
 
 const TABS = [
-  { id: 'csv',    label: 'CSV',    icon: FileText },
-  { id: 'wallos', label: 'WallOS', icon: Globe },
+  { id: 'csv',    label: 'CSV Import', icon: FileText },
+  { id: 'wallos', label: 'WallOS',     icon: Globe },
+  { id: 'export', label: 'Export',     icon: Download },
 ] as const
 
 type TabId = (typeof TABS)[number]['id']
@@ -182,6 +183,65 @@ function CsvImportPanel() {
 }
 
 // ---------------------------------------------------------------------------
+// Export panel
+// ---------------------------------------------------------------------------
+
+function ExportPanel() {
+  const { data: buckets = [], isLoading } = useQuery({
+    queryKey: ['buckets'],
+    queryFn: bucketsApi.list,
+  })
+
+  const [downloading, setDownloading] = useState<string | null>(null)
+  const [error, setError] = useState('')
+
+  const handleExport = async (bucketId: string, bucketName: string) => {
+    setDownloading(bucketId)
+    setError('')
+    try {
+      await subscriptionsApi.exportCsv(bucketId, bucketName)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Export failed')
+    } finally {
+      setDownloading(null)
+    }
+  }
+
+  return (
+    <div className="max-w-xl space-y-6">
+      <p className="text-sm text-gray-500">
+        Download all subscriptions from a bucket as a CSV file. The format
+        matches the CSV import so files can be re-imported directly.
+      </p>
+
+      <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">
+        {isLoading ? (
+          <p className="text-sm text-gray-400 text-center py-8">Loading…</p>
+        ) : buckets.length === 0 ? (
+          <p className="text-sm text-gray-400 text-center py-8">No buckets found.</p>
+        ) : (
+          buckets.map((bucket) => (
+            <div key={bucket.id} className="flex items-center justify-between px-5 py-4">
+              <span className="text-sm font-medium text-gray-800">{bucket.name}</span>
+              <button
+                onClick={() => handleExport(bucket.id, bucket.name)}
+                disabled={downloading === bucket.id}
+                className="flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300 disabled:opacity-50 transition"
+              >
+                <Download size={14} className={downloading === bucket.id ? 'animate-pulse' : ''} />
+                {downloading === bucket.id ? 'Downloading…' : 'Export CSV'}
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+
+      {error && <p className="text-sm text-red-500">{error}</p>}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Hub
 // ---------------------------------------------------------------------------
 
@@ -211,6 +271,7 @@ export default function ImportHub() {
       {/* Panel */}
       {activeTab === 'csv'    && <CsvImportPanel />}
       {activeTab === 'wallos' && <WallosImport />}
+      {activeTab === 'export' && <ExportPanel />}
     </div>
   )
 }
