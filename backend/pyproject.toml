@@ -18,6 +18,8 @@ dependencies = [
     "pydantic-settings>=2.3",
     "python-dotenv>=1.0",
     "openai>=1.30",
+    "python-dateutil>=2.9",
+    "mcp>=1.0",
 ]
 
 [project.optional-dependencies]
