@@ -30,7 +30,7 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: 'DEV_MODE=true DATABASE_URL="sqlite+aiosqlite:///./e2e_test.db" uvicorn backend.main:app --port 8000',
+      command: 'DEV_MODE=true DATABASE_URL="sqlite+aiosqlite:///./e2e_test.db" backend/.venv/bin/uvicorn backend.main:app --port 8000',
       url: 'http://localhost:8000/api/health',
       reuseExistingServer: !process.env.CI,
       timeout: 30000,
