@@ -19,6 +19,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.config import settings
@@ -82,10 +83,32 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------
     # Serve built React SPA (only when the dist directory exists)
+    #
+    # StaticFiles(html=True) only serves index.html for directory-like
+    # paths and returns 404 for unknown routes such as /auth/callback.
+    # A proper SPA catch-all is required so the React router handles all
+    # client-side paths — exact static files are served as-is, everything
+    # else falls back to index.html.
     # ------------------------------------------------------------------
     static_dir = Path(__file__).parent / "static"
     if static_dir.exists():
-        app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="spa")
+        # Mount /assets separately so Starlette serves them efficiently
+        # with correct Content-Type headers and caching support.
+        assets_dir = static_dir / "assets"
+        if assets_dir.exists():
+            app.mount(
+                "/assets",
+                StaticFiles(directory=str(assets_dir)),
+                name="assets",
+            )
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def serve_spa(full_path: str) -> FileResponse:  # type: ignore[return]
+            """Serve static files or fall back to the SPA index."""
+            candidate = static_dir / full_path
+            if candidate.is_file():
+                return FileResponse(str(candidate))
+            return FileResponse(str(static_dir / "index.html"))
 
     return app
 
