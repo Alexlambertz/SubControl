@@ -139,6 +139,10 @@ def _register_routers(app: FastAPI) -> None:
             "dev_mode": settings.dev_mode,
             "oidc_issuer_url": public_issuer,
             "oidc_client_id": settings.oidc_client_id,
+            # Client secret forwarded so the browser can authenticate
+            # confidential Keycloak clients during the token exchange.
+            # Empty string for public clients.
+            "oidc_client_secret": settings.oidc_client_secret,
         }
 
     app.include_router(health_router)

@@ -113,14 +113,36 @@ async def _validate_jwt(token: str) -> CurrentUser:
                 resp.raise_for_status()
                 _jwks_cache = resp.json()
 
-        # Decode and validate
-        payload = jwt.decode(
-            token,
-            _jwks_cache,
-            algorithms=["RS256"],
-            audience=settings.oidc_client_id,
-            issuer=settings.oidc_issuer_url,
-        )
+        # Decode and validate.
+        # Try strict audience validation first; fall back to checking `azp`
+        # because Keycloak typically sets aud=["account"] on access tokens
+        # rather than the client_id.
+        try:
+            payload = jwt.decode(
+                token,
+                _jwks_cache,
+                algorithms=["RS256"],
+                audience=settings.oidc_client_id,
+                issuer=settings.oidc_issuer_url,
+            )
+        except JWTError:
+            # Relax audience check — accept if azp or aud contains our client_id
+            payload = jwt.decode(
+                token,
+                _jwks_cache,
+                algorithms=["RS256"],
+                options={"verify_aud": False},
+                issuer=settings.oidc_issuer_url,
+            )
+            azp = payload.get("azp", "")
+            aud = payload.get("aud", [])
+            if isinstance(aud, str):
+                aud = [aud]
+            if azp != settings.oidc_client_id and settings.oidc_client_id not in aud:
+                raise JWTError(
+                    f"Token not issued for client '{settings.oidc_client_id}' "
+                    f"(azp={azp!r}, aud={aud!r})"
+                )
 
         return CurrentUser(
             id=payload.get("sub", ""),

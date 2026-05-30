@@ -23,13 +23,16 @@ export default function AuthCallback() {
         const config = await resp.json() as {
           oidc_issuer_url: string
           oidc_client_id: string
+          oidc_client_secret: string
         }
 
         // Use the same UserManager settings as AuthContext so the stored
         // PKCE state (code_verifier etc.) in sessionStorage is found.
+        // client_secret is required for Keycloak confidential clients.
         const um = new UserManager({
           authority: config.oidc_issuer_url,
           client_id: config.oidc_client_id,
+          ...(config.oidc_client_secret ? { client_secret: config.oidc_client_secret } : {}),
           redirect_uri: `${window.location.origin}/auth/callback`,
           response_type: 'code',
           scope: 'openid profile email',
