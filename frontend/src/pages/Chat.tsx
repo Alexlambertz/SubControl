@@ -251,6 +251,7 @@ export default function Chat() {
             onClick={send}
             disabled={(!input.trim() && !attachedFile) || loading}
             className="p-2 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:opacity-40 transition shrink-0"
+            aria-label="Send"
           >
             <Send size={18} />
           </button>

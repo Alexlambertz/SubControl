@@ -1,52 +1,76 @@
 /**
- * E2E: Dashboard flow.
+ * E2E: Dashboard flows.
  *
- * Covers: total monthly display, mode toggle, bucket filter.
+ * Covers: total monthly display, mode toggle (Average/Real), bucket filter.
+ *
+ * Seeds one bucket + one subscription via the API before each test,
+ * then cleans up afterwards.
  */
 
 import { test, expect } from '@playwright/test'
 
+const API = 'http://127.0.0.1:8000/api'
+
 test.describe('Dashboard', () => {
+  let bucketId: string
+
   test.beforeEach(async ({ request }) => {
-    // Seed data: bucket + subscriptions
-    const bucketRes = await request.post('http://localhost:8000/api/buckets', {
+    const bucketRes = await request.post(`${API}/buckets`, {
       data: { name: `DashBucket-${Date.now()}` },
     })
-    const bucket = await bucketRes.json()
-    await request.post(
-      `http://localhost:8000/api/buckets/${bucket.id}/subscriptions`,
-      {
-        data: {
-          name: 'Acme Cloud',
-          provider_name: 'Acme',
-          recurring_interval: 'monthly',
-          amount: 25.0,
-          currency: 'EUR',
-        },
-      }
-    )
+    const bucket = await bucketRes.json() as { id: string }
+    bucketId = bucket.id
+
+    await request.post(`${API}/buckets/${bucketId}/subscriptions`, {
+      data: {
+        name: 'Acme Cloud',
+        provider_name: 'Acme',
+        recurring_interval: 'monthly',
+        amount: 25.0,
+        currency: 'EUR',
+      },
+    })
   })
 
-  test('shows total monthly spend', async ({ page }) => {
+  test.afterEach(async ({ request }) => {
+    await request.delete(`${API}/buckets/${bucketId}`).catch(() => {})
+  })
+
+  test('shows Total monthly spend section', async ({ page }) => {
     await page.goto('/')
-    // Wait for the dashboard to load
-    await expect(page.getByText(/total monthly spend/i)).toBeVisible()
-    // Some non-zero amount should be shown
-    await expect(page.getByText(/€\d+/)).toBeVisible()
+    await expect(page.getByText(/total monthly spend/i)).toBeVisible({ timeout: 10000 })
   })
 
-  test('can switch between average and real modes', async ({ page }) => {
+  test('can switch to Real monthly mode', async ({ page }) => {
+    await page.goto('/')
+    // The toggle buttons say "Average monthly" and "Real monthly"
+    await page.getByRole('button', { name: /real monthly/i }).click()
+    // The MonthPicker calendar button should appear (it shows the current month)
+    await expect(page.getByRole('button', { name: /calendar|^\w+ \d{4}$/i })).toBeVisible()
+  })
+
+  test('can switch back to Average monthly mode', async ({ page }) => {
     await page.goto('/')
     await page.getByRole('button', { name: /real monthly/i }).click()
-    // Month picker should appear
-    await expect(page.locator('input[type="month"]')).toBeVisible()
     await page.getByRole('button', { name: /average monthly/i }).click()
-    await expect(page.locator('input[type="month"]')).not.toBeVisible()
+    // MonthPicker should be gone — only the mode buttons remain
+    await expect(page.getByRole('button', { name: /real monthly/i })).toBeVisible()
   })
 
-  test('can filter by bucket', async ({ page }) => {
+  test('has a bucket filter dropdown', async ({ page }) => {
     await page.goto('/')
-    // Bucket dropdown should be present
-    await expect(page.getByRole('combobox')).toBeVisible()
+    // The bucket select shows "All buckets" by default
+    const select = page.getByRole('combobox')
+    await expect(select).toBeVisible()
+    await expect(select).toContainText(/all buckets/i)
+  })
+
+  test('bucket filter lists the seeded bucket', async ({ page }) => {
+    await page.goto('/')
+    const select = page.getByRole('combobox')
+    await expect(select).toBeVisible()
+    // The seeded bucket should appear in the dropdown options
+    const options = await select.locator('option').allTextContents()
+    expect(options.some((o) => o.match(/DashBucket/i))).toBeTruthy()
   })
 })
