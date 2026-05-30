@@ -94,9 +94,10 @@ def _register_routers(app: FastAPI) -> None:
     """Import and include all API routers."""
     from backend.routers import (
         auth, buckets, users, subscriptions, dashboard,
-        import_csv, import_external, settings, chat,
+        import_csv, import_external, chat,
         providers_categories, search,
     )
+    from backend.routers import settings as settings_router
 
     app.include_router(auth.router)
     app.include_router(buckets.router)
@@ -106,7 +107,7 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(import_csv.router)
     app.include_router(subscriptions.router)
     app.include_router(dashboard.router)
-    app.include_router(settings.router)
+    app.include_router(settings_router.router)
     app.include_router(chat.router)
     app.include_router(import_external.router)
     app.include_router(providers_categories.providers_router)
