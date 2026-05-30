@@ -20,14 +20,18 @@
  */
 
 import { useEffect, useState } from 'react'
+import { WebStorageStateStore } from 'oidc-client-ts'
 import { setAccessToken } from '../api/client'
 import { usersApi } from '../api/users'
 
-/** Shape of the PKCE state object stored by oidc-client-ts in sessionStorage. */
+/**
+ * Shape of the PKCE state object stored by oidc-client-ts.
+ * `data` holds the user-provided value from signinRedirect({ state: ... }).
+ * `code_verifier` is the PKCE secret generated before the redirect.
+ */
 interface OidcState {
   code_verifier: string
-  /** The user-provided state passed to signinRedirect() — our return-to path. */
-  state?: unknown
+  data?: unknown   // return-to path we passed as `state` to signinRedirect()
 }
 
 export default function AuthCallback() {
@@ -46,14 +50,22 @@ export default function AuthCallback() {
 
         // Retrieve the PKCE code_verifier (and return-to path) that
         // oidc-client-ts stored before redirecting to Keycloak.
-        const storedRaw = window.sessionStorage.getItem(`oidc.${stateKey}`)
+        //
+        // We use WebStorageStateStore with sessionStorage — matching the
+        // explicit stateStore config in AuthContext's buildUserManager.
+        // Using the API (rather than raw getItem) ensures the "oidc." prefix
+        // is applied consistently regardless of future library changes.
+        const stateStore = new WebStorageStateStore({ store: window.sessionStorage })
+        const storedRaw = await stateStore.get(stateKey)
         if (!storedRaw) {
           throw new Error('OIDC session state not found — please try signing in again')
         }
         const stored = JSON.parse(storedRaw) as OidcState
         const { code_verifier } = stored
+        // oidc-client-ts stores the user-provided signinRedirect({ state })
+        // value under the key "data", not "state".
         const returnTo =
-          typeof stored.state === 'string' && stored.state ? stored.state : '/'
+          typeof stored.data === 'string' && stored.data ? stored.data : '/'
 
         // Exchange the code via the backend — client_secret is added server-side
         const exchangeResp = await fetch('/api/auth/exchange', {
@@ -81,7 +93,7 @@ export default function AuthCallback() {
         await usersApi.login()
 
         // Clean up OIDC flow state — no longer needed
-        window.sessionStorage.removeItem(`oidc.${stateKey}`)
+        await stateStore.remove(stateKey)
 
         // Full page replace so AuthContext re-initialises cleanly
         window.location.replace(returnTo)

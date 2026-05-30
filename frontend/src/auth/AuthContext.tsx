@@ -64,6 +64,11 @@ export function getUserManager(): UserManager | null {
 function buildUserManager(config: AppConfig): UserManager {
   // The SPA is an OAuth 2.0 public client — PKCE replaces the client secret.
   // oidc-client-ts generates a code_verifier/code_challenge automatically.
+  //
+  // Both stateStore (PKCE flow state) and userStore (token cache) are pinned
+  // to sessionStorage.  oidc-client-ts v3 defaults stateStore to localStorage;
+  // sessionStorage is safer because it is cleared when the tab closes.
+  const sessionStore = new WebStorageStateStore({ store: window.sessionStorage })
   _userManager = new UserManager({
     authority: config.oidc_issuer_url,
     client_id: config.oidc_client_id,
@@ -71,7 +76,8 @@ function buildUserManager(config: AppConfig): UserManager {
     post_logout_redirect_uri: `${window.location.origin}/`,
     response_type: 'code',
     scope: 'openid profile email',
-    userStore: new WebStorageStateStore({ store: window.sessionStorage }),
+    userStore: sessionStore,
+    stateStore: sessionStore,
     // Silent renew requires a dedicated /silent-renew.html; disabled for now.
     automaticSilentRenew: false,
   })
