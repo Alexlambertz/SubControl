@@ -7,15 +7,19 @@
 import { useState, useRef, useEffect } from 'react'
 import { Send, Bot, User, Trash2, Paperclip, X, FileText } from 'lucide-react'
 import { sendChatMessage } from '../api/chat'
+import { useAuth } from '../auth/AuthContext'
 import type { ChatMessage } from '../types'
 
-const STORAGE_KEY = 'subcontrol_chat_messages'
-
 export default function Chat() {
+  // Chat history is stored per user so different accounts don't share it.
+  // user is always set here because Chat renders inside RequireAuth.
+  const { user } = useAuth()
+  const storageKey = `subcontrol_chat_messages_${user?.id ?? 'anon'}`
+
   const [attachedFile, setAttachedFile] = useState<{ name: string; content: string } | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     try {
-      const saved = sessionStorage.getItem(STORAGE_KEY)
+      const saved = sessionStorage.getItem(storageKey)
       return saved ? (JSON.parse(saved) as ChatMessage[]) : []
     } catch {
       return []
@@ -40,7 +44,7 @@ export default function Chat() {
   // Persist history across navigation
   useEffect(() => {
     try {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(messages))
+      sessionStorage.setItem(storageKey, JSON.stringify(messages))
     } catch {
       // sessionStorage unavailable (e.g. private browsing quota) — ignore
     }
@@ -124,7 +128,7 @@ export default function Chat() {
     setInput('')
     setAttachedFile(null)
     try {
-      sessionStorage.removeItem(STORAGE_KEY)
+      sessionStorage.removeItem(storageKey)
     } catch {
       // ignore
     }

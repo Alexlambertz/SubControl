@@ -4,6 +4,8 @@
  * The backend streams newline-delimited text chunks via Server-Sent Events.
  */
 
+import { authHeaders } from './client'
+
 const BASE = '/api'
 
 export interface HistoryMessage {
@@ -35,7 +37,7 @@ export async function sendChatMessage(
 ): Promise<void> {
   const res = await fetch(`${BASE}/chat/message`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders(),
     body: JSON.stringify(payload),
     signal,
   })

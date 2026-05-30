@@ -19,7 +19,7 @@ export function setAccessToken(token: string | null): void {
   _accessToken = token
 }
 
-function authHeaders(): Record<string, string> {
+export function authHeaders(): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (_accessToken) {
     headers['Authorization'] = `Bearer ${_accessToken}`

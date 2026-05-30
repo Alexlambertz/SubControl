@@ -12,9 +12,11 @@ import { test, expect } from '@playwright/test'
 
 test.describe('AI Chat', () => {
   test.beforeEach(async ({ page }) => {
-    // Clear chat history stored in localStorage so we always see the empty state
+    // Clear chat history stored in sessionStorage so we always see the empty state.
+    // In DEV_MODE the dummy user id is 00000000000000000000000000000001.
     await page.addInitScript(() => {
-      window.localStorage.removeItem('subcontrol_chat_messages')
+      const DEV_USER_ID = '00000000000000000000000000000001'
+      window.sessionStorage.removeItem(`subcontrol_chat_messages_${DEV_USER_ID}`)
     })
     await page.goto('/chat')
     // Wait for the page to settle
