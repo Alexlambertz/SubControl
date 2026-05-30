@@ -9,6 +9,15 @@ without any token validation.  This allows local testing without Keycloak.
 In production mode the Authorization header is validated as a Bearer JWT
 issued by the configured Keycloak realm.  The JWKS endpoint is fetched once
 and cached for the lifetime of the process.
+
+Admin status
+------------
+After the JWT is validated, the database is checked for the user's
+is_admin flag.  This makes the database the authoritative source of truth,
+so that in-app admin grants (e.g. first-user promotion) are respected even
+when the Keycloak token does not carry the 'admin' realm role.
+If the user is not yet in the database (first request before /auth/login),
+the JWT realm_access.roles claim is used as a fallback.
 """
 
 from __future__ import annotations
@@ -17,10 +26,12 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
+import aiosqlite
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from backend.config import settings
+from backend.database import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +65,14 @@ _bearer = HTTPBearer(auto_error=False)
 
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
+    db: aiosqlite.Connection = Depends(get_db),
 ) -> CurrentUser:
     """
     Return the current authenticated user.
 
     - DEV_MODE=true  → always returns the dummy admin user.
-    - DEV_MODE=false → validates the Bearer JWT from Keycloak.
+    - DEV_MODE=false → validates the Bearer JWT from Keycloak, then looks up
+                       the user's is_admin flag in the database (authoritative).
     """
     if settings.dev_mode:
         return _DEV_USER
@@ -72,7 +85,22 @@ async def get_current_user(
         )
 
     token = credentials.credentials
-    return await _validate_jwt(token)
+    user = await _validate_jwt(token)
+
+    # Override is_admin with the value stored in the database.
+    # This ensures first-user promotion and any in-app admin grants take
+    # effect immediately, regardless of Keycloak realm roles.
+    async with db.execute(
+        "SELECT is_admin FROM users WHERE id = ?", (user.id,)
+    ) as cur:
+        row = await cur.fetchone()
+
+    if row is not None:
+        # Use DB as source of truth
+        return CurrentUser(id=user.id, username=user.username, is_admin=bool(row["is_admin"]))
+
+    # User not yet in DB (hasn't hit /auth/login yet) — fall back to JWT claim
+    return user
 
 
 async def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
@@ -147,6 +175,8 @@ async def _validate_jwt(token: str) -> CurrentUser:
         return CurrentUser(
             id=payload.get("sub", ""),
             username=payload.get("preferred_username", payload.get("sub", "")),
+            # JWT claim used only as fallback; DB value takes precedence in
+            # get_current_user after this function returns.
             is_admin="admin" in payload.get("realm_access", {}).get("roles", []),
         )
 
