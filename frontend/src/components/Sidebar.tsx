@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import clsx from 'clsx'
 import { useAuth } from '../auth/AuthContext'
+import { version } from '../../package.json'
 
 interface Props {
   isOpen: boolean
@@ -87,6 +88,11 @@ export default function Sidebar({ isOpen, onClose }: Props) {
           </li>
         ))}
       </ul>
+
+      {/* Version */}
+      <div className="px-5 py-3 border-t border-gray-100 shrink-0">
+        <p className="text-xs text-gray-400">v{version}</p>
+      </div>
     </nav>
   )
 }
