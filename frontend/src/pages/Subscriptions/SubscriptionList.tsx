@@ -245,7 +245,7 @@ export default function SubscriptionList() {
           <p className="text-gray-400 text-sm">No subscriptions in this bucket yet.</p>
         </div>
       ) : (
-        <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">
+        <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100 overflow-x-auto">
           {subs.map((sub) => {
             const isDuplicateCandidate = duplicateGroups.some((g) =>
               g.subscriptions.some((s) => s.id === sub.id),

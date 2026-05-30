@@ -152,7 +152,7 @@ export default function UserList() {
       {isLoading ? (
         <div className="text-gray-400 text-center py-12">Loading…</div>
       ) : (
-        <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">
+        <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100 overflow-x-auto">
           {users.length === 0 ? (
             <p className="py-8 text-center text-gray-400 text-sm">No users found.</p>
           ) : (

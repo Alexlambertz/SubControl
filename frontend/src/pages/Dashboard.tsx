@@ -326,6 +326,7 @@ export default function Dashboard() {
                       )}
                     </h2>
                   </div>
+                  <div className="overflow-x-auto">
                   <table className="min-w-full text-sm divide-y divide-gray-100">
                     <thead>
                       <tr className="text-gray-500 text-xs uppercase">
@@ -344,6 +345,7 @@ export default function Dashboard() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 </div>
               ) : null
             })()}
