@@ -1,7 +1,7 @@
 /**
  * Application sidebar with navigation links.
+ * Admin-only links (Users, Settings) are hidden for non-admin users.
  */
-
 
 import { NavLink } from 'react-router-dom'
 import {
@@ -13,17 +13,22 @@ import {
   Upload,
 } from 'lucide-react'
 import clsx from 'clsx'
+import { useAuth } from '../auth/AuthContext'
 
-const links = [
-  { to: '/', label: 'Dashboard', icon: LayoutDashboard },
-  { to: '/buckets', label: 'Buckets', icon: FolderOpen },
-  { to: '/users', label: 'Users', icon: Users },
-  { to: '/import', label: 'Import', icon: Upload },
-  { to: '/chat', label: 'AI Chat', icon: MessageSquare },
-  { to: '/settings', label: 'Settings', icon: Settings },
+const allLinks = [
+  { to: '/', label: 'Dashboard', icon: LayoutDashboard, adminOnly: false },
+  { to: '/buckets', label: 'Buckets', icon: FolderOpen, adminOnly: false },
+  { to: '/import', label: 'Import', icon: Upload, adminOnly: false },
+  { to: '/chat', label: 'AI Chat', icon: MessageSquare, adminOnly: false },
+  { to: '/users', label: 'Users', icon: Users, adminOnly: true },
+  { to: '/settings', label: 'Settings', icon: Settings, adminOnly: true },
 ]
 
 export default function Sidebar() {
+  const { user } = useAuth()
+  const isAdmin = user?.is_admin ?? false
+  const links = allLinks.filter((l) => !l.adminOnly || isAdmin)
+
   return (
     <nav className="w-56 bg-white border-r border-gray-200 flex flex-col shrink-0">
       {/* Logo */}

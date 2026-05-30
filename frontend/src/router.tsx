@@ -44,6 +44,16 @@ function RequireAuth() {
 }
 
 // ---------------------------------------------------------------------------
+// RequireAdmin — redirects non-admin users to the dashboard.
+// ---------------------------------------------------------------------------
+
+function RequireAdmin() {
+  const { user } = useAuth()
+  if (!user?.is_admin) return <Navigate to="/" replace />
+  return <Outlet />
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -73,10 +83,16 @@ const router = createBrowserRouter([
             element: <Navigate to="/buckets" replace />,
           },
           { path: 'search', element: <Search /> },
-          { path: 'users', element: <UserList /> },
           { path: 'chat', element: <Chat /> },
-          { path: 'settings', element: <Settings /> },
           { path: 'import', element: <ImportHub /> },
+          // Admin-only routes
+          {
+            element: <RequireAdmin />,
+            children: [
+              { path: 'users', element: <UserList /> },
+              { path: 'settings', element: <Settings /> },
+            ],
+          },
         ],
       },
     ],
