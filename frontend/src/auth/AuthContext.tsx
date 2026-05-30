@@ -7,15 +7,22 @@
  * 2. DEV_MODE=true  → call /api/auth/me directly (no token needed).
  * 3. DEV_MODE=false → use oidc-client-ts:
  *    a. If already at /auth/callback — let the callback page handle it.
- *    b. Restore existing session from sessionStorage (getUser).
+ *    b. Restore existing session from sessionStorage (subcontrol.access_token).
  *    c. If valid token found  → set Bearer header, call /api/auth/login.
  *    d. If no/expired session → signinRedirect() to Keycloak.
  *
  * Token lifecycle
  * ---------------
- * The access token is stored in sessionStorage by oidc-client-ts and
- * injected into every API request via setAccessToken() from api/client.ts.
- * When the token expires the user is redirected to Keycloak for re-login.
+ * After the OIDC callback the access token is stored under the key
+ * 'subcontrol.access_token' in sessionStorage and injected into every API
+ * request via setAccessToken() from api/client.ts.
+ *
+ * Security note
+ * -------------
+ * oidc-client-ts is used only for the PKCE redirect and logout redirect.
+ * The authorization-code → token exchange is handled by the backend
+ * (POST /api/auth/exchange), which adds the client_secret server-side so
+ * it is never exposed to the browser.
  */
 
 import { createContext, useContext, useEffect, useState } from 'react'
@@ -113,23 +120,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         const um = buildUserManager(config)
 
-        // Try to restore an existing (non-expired) session
-        const oidcUser = await um.getUser()
-        if (oidcUser && !oidcUser.expired) {
-          setAccessToken(oidcUser.access_token)
+        // Try to restore an existing session from the token stored by
+        // AuthCallback after the last successful PKCE exchange.
+        const savedToken = window.sessionStorage.getItem('subcontrol.access_token')
+        if (savedToken) {
+          setAccessToken(savedToken)
           try {
             const u = await usersApi.login()
             if (!cancelled) { setUser(u); setIsLoading(false) }
           } catch {
-            // Token might be stale — force re-login
+            // Token is stale / expired — clear and re-login
+            window.sessionStorage.removeItem('subcontrol.access_token')
             setAccessToken(null)
-            await um.removeUser()
             await um.signinRedirect({ state: window.location.pathname + window.location.search })
           }
           return
         }
 
-        // No valid session → redirect to Keycloak (browser navigates away)
+        // No session → redirect to Keycloak (browser navigates away)
         await um.signinRedirect({
           state: window.location.pathname + window.location.search,
         })
@@ -151,8 +159,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = async () => {
     setUser(null)
     setAccessToken(null)
+    window.sessionStorage.removeItem('subcontrol.access_token')
     if (_userManager) {
-      await _userManager.removeUser()
       await _userManager.signoutRedirect()
     }
   }

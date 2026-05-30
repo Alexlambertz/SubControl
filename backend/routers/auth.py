@@ -3,9 +3,13 @@ Authentication router.
 
 Routes
 ------
-GET  /api/auth/me   → Return the current user's profile.
-POST /api/auth/login → Upsert user from OIDC token, set last_login,
-                       promote first user to admin.
+GET  /api/auth/me       → Return the current user's profile.
+POST /api/auth/login    → Upsert user from OIDC token, set last_login,
+                          promote first user to admin.
+POST /api/auth/exchange → Exchange an OIDC authorization code for an
+                          access token. The client_secret (for confidential
+                          Keycloak clients) is added server-side so it is
+                          never exposed to the browser.
 """
 
 from __future__ import annotations
@@ -13,10 +17,12 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 import aiosqlite
+from backend.config import settings
 from backend.database import get_db
 from backend.dependencies import CurrentUser, get_current_user
 
@@ -26,7 +32,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 # ---------------------------------------------------------------------------
-# Response schemas
+# Schemas
 # ---------------------------------------------------------------------------
 
 
@@ -35,6 +41,12 @@ class UserProfile(BaseModel):
     username: str
     is_admin: bool
     last_login: str | None = None
+
+
+class CodeExchangeRequest(BaseModel):
+    code: str
+    code_verifier: str
+    redirect_uri: str
 
 
 # ---------------------------------------------------------------------------
@@ -114,3 +126,56 @@ async def login(
         is_admin=is_admin,
         last_login=now,
     )
+
+
+@router.post("/exchange")
+async def exchange_code(body: CodeExchangeRequest) -> dict:
+    """
+    Exchange an OIDC authorization code for an access token.
+
+    This endpoint exists so the browser never needs the client_secret:
+    the frontend sends the authorization code + PKCE code_verifier here,
+    and the backend appends the client_secret before forwarding to Keycloak.
+
+    Works for both public clients (no secret) and confidential clients.
+    """
+    token_url = (
+        f"{settings.oidc_issuer_url}/protocol/openid-connect/token"
+    )
+
+    form: dict[str, str] = {
+        "grant_type": "authorization_code",
+        "client_id": settings.oidc_client_id,
+        "code": body.code,
+        "code_verifier": body.code_verifier,
+        "redirect_uri": body.redirect_uri,
+    }
+
+    # Add secret only when the Keycloak client is confidential
+    if settings.oidc_client_secret:
+        form["client_secret"] = settings.oidc_client_secret
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(token_url, data=form, timeout=10)
+
+        if resp.status_code != 200:
+            logger.warning(
+                "Token exchange failed (%s): %s", resp.status_code, resp.text
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token exchange failed",
+            )
+
+        token_data = resp.json()
+        return {"access_token": token_data["access_token"]}
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Token exchange error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not reach authentication server",
+        ) from exc

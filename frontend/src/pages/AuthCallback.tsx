@@ -2,14 +2,33 @@
  * OIDC redirect callback handler — /auth/callback
  *
  * Keycloak redirects here after the user logs in.
- * This page completes the PKCE code exchange, stores the token,
- * upserts the user in the database, then redirects to the original page.
+ *
+ * Security model
+ * --------------
+ * The authorization code + PKCE code_verifier are sent to the backend
+ * POST /api/auth/exchange, which appends the client_secret server-side
+ * before forwarding to Keycloak. The client_secret never touches the browser.
+ *
+ * Flow
+ * ----
+ * 1. Read `code` and `state` from the callback URL.
+ * 2. Read the PKCE `code_verifier` (and the original return-to path) from
+ *    oidc-client-ts's sessionStorage entry (`oidc.<state>`).
+ * 3. POST to /api/auth/exchange — backend completes the token exchange.
+ * 4. Store the access token, upsert the user, clean up sessionStorage.
+ * 5. Full-page redirect to the original URL the user was trying to reach.
  */
 
 import { useEffect, useState } from 'react'
-import { UserManager, WebStorageStateStore } from 'oidc-client-ts'
 import { setAccessToken } from '../api/client'
 import { usersApi } from '../api/users'
+
+/** Shape of the PKCE state object stored by oidc-client-ts in sessionStorage. */
+interface OidcState {
+  code_verifier: string
+  /** The user-provided state passed to signinRedirect() — our return-to path. */
+  state?: unknown
+}
 
 export default function AuthCallback() {
   const [error, setError] = useState<string | null>(null)
@@ -17,36 +36,52 @@ export default function AuthCallback() {
   useEffect(() => {
     async function handle() {
       try {
-        // Fetch the same config the AuthContext uses
-        const resp = await fetch('/api/config')
-        if (!resp.ok) throw new Error(`/api/config returned ${resp.status}`)
-        const config = await resp.json() as {
-          oidc_issuer_url: string
-          oidc_client_id: string
+        const params = new URLSearchParams(window.location.search)
+        const code = params.get('code')
+        const stateKey = params.get('state')
+
+        if (!code || !stateKey) {
+          throw new Error('Missing code or state in callback URL')
         }
 
-        // Use the same UserManager settings as AuthContext so the stored
-        // PKCE state (code_verifier etc.) in sessionStorage is found.
-        // No client_secret — the SPA is a public client and relies on PKCE.
-        const um = new UserManager({
-          authority: config.oidc_issuer_url,
-          client_id: config.oidc_client_id,
-          redirect_uri: `${window.location.origin}/auth/callback`,
-          response_type: 'code',
-          scope: 'openid profile email',
-          userStore: new WebStorageStateStore({ store: window.sessionStorage }),
+        // Retrieve the PKCE code_verifier (and return-to path) that
+        // oidc-client-ts stored before redirecting to Keycloak.
+        const storedRaw = window.sessionStorage.getItem(`oidc.${stateKey}`)
+        if (!storedRaw) {
+          throw new Error('OIDC session state not found — please try signing in again')
+        }
+        const stored = JSON.parse(storedRaw) as OidcState
+        const { code_verifier } = stored
+        const returnTo =
+          typeof stored.state === 'string' && stored.state ? stored.state : '/'
+
+        // Exchange the code via the backend — client_secret is added server-side
+        const exchangeResp = await fetch('/api/auth/exchange', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            code,
+            code_verifier,
+            redirect_uri: `${window.location.origin}/auth/callback`,
+          }),
         })
 
-        const oidcUser = await um.signinRedirectCallback()
-        setAccessToken(oidcUser.access_token)
+        if (!exchangeResp.ok) {
+          const detail = await exchangeResp.text()
+          throw new Error(`Token exchange failed (${exchangeResp.status}): ${detail}`)
+        }
+
+        const { access_token } = (await exchangeResp.json()) as { access_token: string }
+
+        // Persist token for session restoration on next page load
+        window.sessionStorage.setItem('subcontrol.access_token', access_token)
+        setAccessToken(access_token)
 
         // Upsert user in DB and record last_login
         await usersApi.login()
 
-        // Return to the page the user was trying to reach before login
-        const returnTo = (typeof oidcUser.state === 'string' && oidcUser.state)
-          ? oidcUser.state
-          : '/'
+        // Clean up OIDC flow state — no longer needed
+        window.sessionStorage.removeItem(`oidc.${stateKey}`)
 
         // Full page replace so AuthContext re-initialises cleanly
         window.location.replace(returnTo)
