@@ -33,7 +33,6 @@ interface AppConfig {
   dev_mode: boolean
   oidc_issuer_url: string
   oidc_client_id: string
-  oidc_client_secret: string
 }
 
 interface AuthContextValue {
@@ -56,11 +55,11 @@ export function getUserManager(): UserManager | null {
 }
 
 function buildUserManager(config: AppConfig): UserManager {
+  // The SPA is an OAuth 2.0 public client — PKCE replaces the client secret.
+  // oidc-client-ts generates a code_verifier/code_challenge automatically.
   _userManager = new UserManager({
     authority: config.oidc_issuer_url,
     client_id: config.oidc_client_id,
-    // Required for Keycloak confidential clients that have a client secret configured
-    ...(config.oidc_client_secret ? { client_secret: config.oidc_client_secret } : {}),
     redirect_uri: `${window.location.origin}/auth/callback`,
     post_logout_redirect_uri: `${window.location.origin}/`,
     response_type: 'code',
