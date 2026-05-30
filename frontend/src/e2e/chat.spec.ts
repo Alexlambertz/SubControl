@@ -50,9 +50,12 @@ test.describe('AI Chat', () => {
     await textarea.fill('Hello')
     await page.getByRole('button', { name: /send/i }).click()
 
-    // Wait for the assistant bubble to appear (response or config error)
-    await expect(
-      page.getByText(/not configured|ai_api_url|hello|error|failed/i)
-    ).toBeVisible({ timeout: 20000 })
+    // Wait for the assistant bubble to appear and finish streaming.
+    // Assistant bubbles have rounded-tl-sm (user bubbles have rounded-tr-sm),
+    // so this selector never matches the outgoing "Hello" message.
+    const assistantBubble = page.locator('.rounded-tl-sm')
+    await expect(assistantBubble).toBeVisible({ timeout: 20000 })
+    // Ensure the loading placeholder '…' has been replaced by real content
+    await expect(assistantBubble).not.toHaveText('…', { timeout: 20000 })
   })
 })
