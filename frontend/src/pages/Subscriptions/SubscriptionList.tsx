@@ -245,85 +245,110 @@ export default function SubscriptionList() {
           <p className="text-gray-400 text-sm">No subscriptions in this bucket yet.</p>
         </div>
       ) : (
-        <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100 overflow-x-auto">
+        <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">
           {subs.map((sub) => {
             const isDuplicateCandidate = duplicateGroups.some((g) =>
               g.subscriptions.some((s) => s.id === sub.id),
             )
             const isMarkedUnique = markedUniqueIds.has(sub.id)
+            const endDateExpired =
+              sub.end_date != null &&
+              sub.end_date <= new Date().toISOString().slice(0, 10)
 
             return (
               <div
                 key={sub.id}
                 onClick={() => setEditSub(sub)}
-                className={`flex items-center gap-4 px-5 py-4 hover:bg-gray-50 transition cursor-pointer ${
-                  isDuplicateCandidate ? 'border-l-2 border-l-amber-300' : ''
+                className={`flex items-start gap-3 px-4 py-3 hover:bg-gray-50 transition cursor-pointer${
+                  isDuplicateCandidate ? ' border-l-2 border-l-amber-300' : ''
                 }`}
               >
-                <ProviderLogo name={sub.provider_name} imageUrl={sub.image_url} size={40} />
+                {/* Logo */}
+                <div className="shrink-0 mt-0.5">
+                  <ProviderLogo name={sub.provider_name} imageUrl={sub.image_url} size={38} />
+                </div>
 
+                {/* All text content */}
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="font-medium text-gray-800 truncate">{sub.name}</p>
-                    {isMarkedUnique && (
-                      <span
-                        className="text-xs text-emerald-600 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full shrink-0"
-                        title="Marked as intentional — excluded from duplicate detection"
-                      >
-                        ✓ kept
-                      </span>
-                    )}
+                  {/* Row 1 — Name + Amount */}
+                  <div className="flex items-start justify-between gap-2">
+                    {/* Name + "kept" badge */}
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <p className="font-medium text-gray-800 truncate leading-snug">
+                          {sub.name}
+                        </p>
+                        {isMarkedUnique && (
+                          <span
+                            className="text-xs text-emerald-600 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full shrink-0"
+                            title="Marked as intentional — excluded from duplicate detection"
+                          >
+                            ✓ kept
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Amount — always top-right, never shrinks away */}
+                    <div className="text-right shrink-0 ml-2">
+                      <CurrencyDisplay
+                        amount={sub.amount}
+                        currency={sub.currency}
+                        className="font-semibold text-gray-800 text-sm"
+                      />
+                      <p className="text-xs text-gray-400 mt-0.5 whitespace-nowrap">
+                        {sub.recurring_date ?? '—'}
+                      </p>
+                    </div>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2 mt-0.5">
-                    {sub.provider_name && (
-                      <span className="text-xs text-gray-500">{sub.provider_name}</span>
-                    )}
-                    {sub.category_name && (
-                      <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
-                        {sub.category_name}
-                      </span>
-                    )}
-                    {sub.end_date && (() => {
-                      const expired = sub.end_date <= new Date().toISOString().slice(0, 10)
-                      return (
-                        <span className={`text-xs px-2 py-0.5 rounded-full border ${
-                          expired
-                            ? 'bg-amber-50 text-amber-600 border-amber-200'
-                            : 'bg-blue-50 text-blue-600 border-blue-200'
-                        }`}>
-                          {expired ? 'Ended' : 'Ends'} {sub.end_date}
+
+                  {/* Row 2 — Meta badges + interval + action buttons */}
+                  <div
+                    className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 mt-1.5"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {/* Left: provider / category / end-date / interval */}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {sub.provider_name && (
+                        <span className="text-xs text-gray-500">{sub.provider_name}</span>
+                      )}
+                      {sub.category_name && (
+                        <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
+                          {sub.category_name}
                         </span>
-                      )
-                    })()}
+                      )}
+                      {sub.end_date && (
+                        <span
+                          className={`text-xs px-2 py-0.5 rounded-full border ${
+                            endDateExpired
+                              ? 'bg-amber-50 text-amber-600 border-amber-200'
+                              : 'bg-blue-50 text-blue-600 border-blue-200'
+                          }`}
+                        >
+                          {endDateExpired ? 'Ended' : 'Ends'} {sub.end_date}
+                        </span>
+                      )}
+                      <IntervalBadge interval={sub.recurring_interval} />
+                    </div>
+
+                    {/* Right: edit / delete */}
+                    <div className="flex items-center gap-0.5 shrink-0">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setEditSub(sub) }}
+                        className="p-1.5 text-gray-400 hover:text-blue-600 rounded transition"
+                        title="Edit"
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setDeleteSub(sub) }}
+                        className="p-1.5 text-gray-400 hover:text-red-600 rounded transition"
+                        title="Delete"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
                   </div>
-                </div>
-
-                <IntervalBadge interval={sub.recurring_interval} />
-
-                <div className="text-right shrink-0">
-                  <CurrencyDisplay
-                    amount={sub.amount}
-                    currency={sub.currency}
-                    className="font-semibold text-gray-800"
-                  />
-                  <p className="text-xs text-gray-400 mt-0.5">{sub.recurring_date ?? '—'}</p>
-                </div>
-
-                <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
-                  <button
-                    onClick={() => setEditSub(sub)}
-                    className="p-1.5 text-gray-400 hover:text-blue-600 rounded transition"
-                    title="Edit"
-                  >
-                    <Pencil size={15} />
-                  </button>
-                  <button
-                    onClick={() => setDeleteSub(sub)}
-                    className="p-1.5 text-gray-400 hover:text-red-600 rounded transition"
-                    title="Delete"
-                  >
-                    <Trash2 size={15} />
-                  </button>
                 </div>
               </div>
             )

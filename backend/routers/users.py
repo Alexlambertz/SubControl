@@ -19,6 +19,7 @@ import logging
 
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from backend.database import get_db
@@ -128,7 +129,7 @@ async def get_user_buckets(
     return [row["bucket_id"] for row in rows]
 
 
-@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 async def delete_user(
     user_id: str,
     _admin: CurrentUser = Depends(require_admin),

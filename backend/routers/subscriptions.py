@@ -21,6 +21,7 @@ from typing import Optional
 
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import Response
 from pydantic import BaseModel, field_validator
 
 from backend.database import get_db
@@ -384,6 +385,7 @@ async def update_subscription(
 @router.delete(
     "/api/buckets/{bucket_id}/subscriptions/{sub_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
 )
 async def delete_subscription(
     bucket_id: str,

@@ -18,6 +18,7 @@ import logging
 
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import Response
 from pydantic import BaseModel, field_validator
 
 from backend.database import get_db
@@ -140,7 +141,7 @@ async def update_bucket(
     return BucketResponse(**await _get_bucket_or_404(bucket_id, db))
 
 
-@router.delete("/{bucket_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{bucket_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 async def delete_bucket(
     bucket_id: str,
     _user: CurrentUser = Depends(require_admin),
