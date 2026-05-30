@@ -12,6 +12,7 @@ GET /api/buckets/{bucket_id}/subscriptions/export
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import logging
@@ -20,7 +21,7 @@ import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
-from backend.database import get_db
+from backend.database import get_db, get_db_path
 from backend.dependencies import CurrentUser, get_current_user
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,47 @@ async def import_subscriptions(
         result["imported"],
         len(result["failed"]),
     )
+
+    # Kick off logo fetching in the background for newly imported subscriptions
+    if result["imported"] > 0:
+        from backend.services.logo_fetch import refresh_logos_for_bucket
+        asyncio.create_task(
+            refresh_logos_for_bucket(bucket_id, get_db_path(), only_missing=True)
+        )
+
     return result
+
+
+@router.post("/api/buckets/{bucket_id}/subscriptions/refresh-logos")
+async def refresh_subscription_logos(
+    bucket_id: str,
+    _user: CurrentUser = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+) -> dict:
+    """
+    Re-fetch and store logo URLs for every subscription in *bucket_id*.
+
+    Returns immediately; the actual fetching runs as a background task.
+    """
+    async with db.execute("SELECT id FROM buckets WHERE id = ?", (bucket_id,)) as cur:
+        if await cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Bucket not found")
+
+    async with db.execute(
+        "SELECT COUNT(*) AS n FROM subscriptions WHERE bucket_id = ?", (bucket_id,)
+    ) as cur:
+        row = await cur.fetchone()
+    subscription_count = row["n"] if row else 0
+
+    from backend.services.logo_fetch import refresh_logos_for_bucket
+    asyncio.create_task(
+        refresh_logos_for_bucket(bucket_id, get_db_path(), only_missing=False)
+    )
+
+    logger.info(
+        "Logo refresh started for bucket %s (%d subscriptions)", bucket_id, subscription_count
+    )
+    return {"status": "started", "subscriptions": subscription_count}
 
 
 @router.get("/api/buckets/{bucket_id}/subscriptions/export")

@@ -1,15 +1,19 @@
 /**
  * Settings page — configure the AI endpoint, model, and API key.
+ * Also provides maintenance utilities (e.g. logo regeneration per bucket).
  */
 
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Save, Eye, EyeOff } from 'lucide-react'
+import { Save, Eye, EyeOff, RefreshCw } from 'lucide-react'
 import { settingsApi } from '../api/settings'
+import { bucketsApi } from '../api/buckets'
+import { subscriptionsApi } from '../api/subscriptions'
 
 export default function Settings() {
   const qc = useQueryClient()
 
+  // ── AI settings ───────────────────────────────────────────────────────────
   const { data: settings = [] } = useQuery({
     queryKey: ['settings'],
     queryFn: settingsApi.list,
@@ -21,7 +25,6 @@ export default function Settings() {
   const [showKey, setShowKey] = useState(false)
   const [saved, setSaved] = useState(false)
 
-  // Populate from fetched settings
   useEffect(() => {
     const get = (key: string) => settings.find((s) => s.key === key)?.value ?? ''
     setAiUrl(get('ai_api_url'))
@@ -42,8 +45,39 @@ export default function Settings() {
     },
   })
 
+  // ── Logo maintenance ──────────────────────────────────────────────────────
+  const { data: buckets = [] } = useQuery({
+    queryKey: ['buckets'],
+    queryFn: bucketsApi.list,
+  })
+
+  const [logoBucketId, setLogoBucketId] = useState('')
+  const [logoMsg, setLogoMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+
+  // Pre-select first bucket once loaded
+  useEffect(() => {
+    if (!logoBucketId && buckets.length > 0) {
+      setLogoBucketId(buckets[0].id)
+    }
+  }, [buckets, logoBucketId])
+
+  const logoMut = useMutation({
+    mutationFn: () => subscriptionsApi.refreshLogos(logoBucketId),
+    onSuccess: (data) => {
+      setLogoMsg({
+        type: 'ok',
+        text: `Logo refresh started for ${data.subscriptions} subscription${data.subscriptions !== 1 ? 's' : ''}.`,
+      })
+      setTimeout(() => setLogoMsg(null), 4000)
+    },
+    onError: (err: Error) => {
+      setLogoMsg({ type: 'err', text: err.message })
+    },
+  })
+
   return (
     <div className="max-w-lg space-y-6">
+      {/* ── AI Chat configuration ─────────────────────────────────────────── */}
       <div className="bg-white rounded-2xl border border-gray-200 p-6">
         <h2 className="text-base font-semibold text-gray-800 mb-5">
           AI Chat configuration
@@ -56,7 +90,6 @@ export default function Settings() {
             saveMut.mutate()
           }}
         >
-          {/* Endpoint */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               API endpoint URL
@@ -69,7 +102,6 @@ export default function Settings() {
             />
           </div>
 
-          {/* Model */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Model
@@ -82,7 +114,6 @@ export default function Settings() {
             />
           </div>
 
-          {/* API Key */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               API key
@@ -119,6 +150,50 @@ export default function Settings() {
             )}
           </div>
         </form>
+      </div>
+
+      {/* ── Logo maintenance ─────────────────────────────────────────────── */}
+      <div className="bg-white rounded-2xl border border-gray-200 p-6">
+        <h2 className="text-base font-semibold text-gray-800 mb-1">
+          Logo maintenance
+        </h2>
+        <p className="text-sm text-gray-500 mb-5">
+          Re-fetch provider logos for all subscriptions in a bucket. Logos are
+          also refreshed automatically when importing from CSV.
+        </p>
+
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Bucket
+            </label>
+            <select
+              value={logoBucketId}
+              onChange={(e) => setLogoBucketId(e.target.value)}
+              className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+            >
+              {buckets.map((b) => (
+                <option key={b.id} value={b.id}>{b.name}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => logoMut.mutate()}
+              disabled={logoMut.isPending || !logoBucketId}
+              className="flex items-center gap-2 bg-blue-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition"
+            >
+              <RefreshCw size={15} className={logoMut.isPending ? 'animate-spin' : ''} />
+              {logoMut.isPending ? 'Starting…' : 'Regenerate logos'}
+            </button>
+            {logoMsg && (
+              <span className={`text-sm ${logoMsg.type === 'ok' ? 'text-green-600' : 'text-red-500'}`}>
+                {logoMsg.type === 'ok' ? '✓ ' : '✗ '}{logoMsg.text}
+              </span>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   )

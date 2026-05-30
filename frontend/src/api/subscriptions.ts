@@ -32,6 +32,11 @@ export const subscriptionsApi = {
     )
   },
 
+  refreshLogos: (bucketId: string) =>
+    post<{ status: string; subscriptions: number }>(
+      `/buckets/${bucketId}/subscriptions/refresh-logos`
+    ),
+
   exportCsv: async (bucketId: string, bucketName: string): Promise<void> => {
     const blob = await getBlob(`/buckets/${bucketId}/subscriptions/export`)
     const url = URL.createObjectURL(blob)
