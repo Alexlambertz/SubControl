@@ -155,6 +155,14 @@ async def exchange_code(body: CodeExchangeRequest) -> dict:
     if settings.oidc_client_secret:
         form["client_secret"] = settings.oidc_client_secret
 
+    logger.info(
+        "Token exchange → %s  client_id=%r  has_secret=%s  redirect_uri=%r",
+        token_url,
+        settings.oidc_client_id,
+        bool(settings.oidc_client_secret),
+        body.redirect_uri,
+    )
+
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(token_url, data=form, timeout=10)
