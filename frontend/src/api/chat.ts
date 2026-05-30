@@ -5,6 +5,7 @@
  */
 
 import { authHeaders } from './client'
+import { silentRefresh, clearSessionTokens } from '../auth/tokenRefresh'
 
 const BASE = '/api'
 
@@ -35,12 +36,27 @@ export async function sendChatMessage(
   onDone: () => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch(`${BASE}/chat/message`, {
+  let res = await fetch(`${BASE}/chat/message`, {
     method: 'POST',
     headers: authHeaders(),
     body: JSON.stringify(payload),
     signal,
   })
+
+  if (res.status === 401) {
+    const refreshed = await silentRefresh()
+    if (!refreshed) {
+      clearSessionTokens()
+      window.location.href = '/'
+      throw new Error('Session expired')
+    }
+    res = await fetch(`${BASE}/chat/message`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(payload),
+      signal,
+    })
+  }
 
   if (!res.ok) {
     throw new Error(`Chat API error: ${res.status}`)

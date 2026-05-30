@@ -22,6 +22,7 @@
 import { useEffect, useState } from 'react'
 import { WebStorageStateStore } from 'oidc-client-ts'
 import { setAccessToken } from '../api/client'
+import { scheduleTokenRefresh } from '../auth/tokenRefresh'
 import { usersApi } from '../api/users'
 
 /**
@@ -83,11 +84,20 @@ export default function AuthCallback() {
           throw new Error(`Token exchange failed (${exchangeResp.status}): ${detail}`)
         }
 
-        const { access_token } = (await exchangeResp.json()) as { access_token: string }
+        const { access_token, refresh_token, expires_in = 300 } = (await exchangeResp.json()) as {
+          access_token: string
+          refresh_token?: string
+          expires_in?: number
+        }
 
-        // Persist token for session restoration on next page load
+        // Persist tokens for session restoration on next page load
         window.sessionStorage.setItem('subcontrol.access_token', access_token)
+        window.sessionStorage.setItem('subcontrol.token_expires_at', String(Date.now() + expires_in * 1000))
+        if (refresh_token) window.sessionStorage.setItem('subcontrol.refresh_token', refresh_token)
         setAccessToken(access_token)
+
+        // Schedule proactive renewal before the token expires
+        scheduleTokenRefresh(expires_in)
 
         // Upsert user in DB and record last_login
         await usersApi.login()

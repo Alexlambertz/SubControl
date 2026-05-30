@@ -29,6 +29,7 @@ import { createContext, useContext, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { UserManager, WebStorageStateStore } from 'oidc-client-ts'
 import { setAccessToken } from '../api/client'
+import { scheduleTokenRefresh, silentRefresh, clearSessionTokens } from './tokenRefresh'
 import { usersApi } from '../api/users'
 import type { User } from '../types'
 
@@ -130,14 +131,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // AuthCallback after the last successful PKCE exchange.
         const savedToken = window.sessionStorage.getItem('subcontrol.access_token')
         if (savedToken) {
-          setAccessToken(savedToken)
+          // Check whether the token is close to expiry and needs an immediate refresh
+          const expiresAt = parseInt(window.sessionStorage.getItem('subcontrol.token_expires_at') ?? '0')
+          const msLeft = expiresAt - Date.now()
+
+          if (msLeft < 60_000) {
+            // Token already expired or expiring in < 60 s — try refresh first
+            const refreshed = await silentRefresh()
+            if (!refreshed) {
+              clearSessionTokens()
+              await um.signinRedirect({ state: window.location.pathname + window.location.search })
+              return
+            }
+            // silentRefresh already called setAccessToken + scheduleTokenRefresh
+          } else {
+            setAccessToken(savedToken)
+            scheduleTokenRefresh(Math.floor(msLeft / 1000))
+          }
+
           try {
             const u = await usersApi.login()
             if (!cancelled) { setUser(u); setIsLoading(false) }
           } catch {
             // Token is stale / expired — clear and re-login
-            window.sessionStorage.removeItem('subcontrol.access_token')
-            setAccessToken(null)
+            clearSessionTokens()
             await um.signinRedirect({ state: window.location.pathname + window.location.search })
           }
           return
@@ -164,8 +181,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     setUser(null)
-    setAccessToken(null)
-    window.sessionStorage.removeItem('subcontrol.access_token')
+    clearSessionTokens()
     if (_userManager) {
       await _userManager.signoutRedirect()
     }

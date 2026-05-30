@@ -49,6 +49,10 @@ class CodeExchangeRequest(BaseModel):
     redirect_uri: str
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -177,12 +181,62 @@ async def exchange_code(body: CodeExchangeRequest) -> dict:
             )
 
         token_data = resp.json()
-        return {"access_token": token_data["access_token"]}
+        return {
+            "access_token": token_data["access_token"],
+            "refresh_token": token_data.get("refresh_token"),
+            "expires_in": token_data.get("expires_in", 300),
+        }
 
     except HTTPException:
         raise
     except Exception as exc:
         logger.error("Token exchange error: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Could not reach authentication server",
+        ) from exc
+
+
+@router.post("/refresh")
+async def refresh_token(body: RefreshRequest) -> dict:
+    """
+    Exchange a refresh token for a new access token.
+
+    Called by the frontend when the access token is about to expire or
+    has expired. The client_secret is added server-side when required.
+    """
+    token_url = f"{settings.oidc_issuer_url}/protocol/openid-connect/token"
+
+    form: dict[str, str] = {
+        "grant_type": "refresh_token",
+        "client_id": settings.oidc_client_id,
+        "refresh_token": body.refresh_token,
+    }
+    if settings.oidc_client_secret:
+        form["client_secret"] = settings.oidc_client_secret
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(token_url, data=form, timeout=10)
+
+        if resp.status_code != 200:
+            logger.warning("Token refresh failed (%s): %s", resp.status_code, resp.text)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token refresh failed",
+            )
+
+        token_data = resp.json()
+        return {
+            "access_token": token_data["access_token"],
+            "refresh_token": token_data.get("refresh_token"),
+            "expires_in": token_data.get("expires_in", 300),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Token refresh error: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Could not reach authentication server",

@@ -10,6 +10,10 @@
  * unauthenticated requests so the token may be absent.
  */
 
+// Note: tokenRefresh imports setAccessToken from this module — the circular
+// dependency is safe because both sides use the imports only inside functions.
+import { silentRefresh, clearSessionTokens } from '../auth/tokenRefresh'
+
 const BASE = '/api'
 
 /** Retrieve stored auth token (set by AuthContext after login). */
@@ -42,6 +46,24 @@ async function handleResponse<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>
 }
 
+/**
+ * Fetch wrapper that retries once after a silent token refresh on 401.
+ * Redirects to / (triggering re-login) if the refresh also fails.
+ */
+async function fetchWithAuth(url: string, init: RequestInit): Promise<Response> {
+  const res = await fetch(url, { ...init, headers: { ...authHeaders(), ...(init.headers as Record<string, string> ?? {}) } })
+  if (res.status !== 401) return res
+
+  const refreshed = await silentRefresh()
+  if (!refreshed) {
+    clearSessionTokens()
+    window.location.href = '/'
+    throw new Error('Session expired')
+  }
+  // Retry once with the new token
+  return fetch(url, { ...init, headers: { ...authHeaders(), ...(init.headers as Record<string, string> ?? {}) } })
+}
+
 export async function get<T>(path: string, params?: Record<string, string | number | boolean | undefined>): Promise<T> {
   let url = `${BASE}${path}`
   if (params) {
@@ -51,48 +73,42 @@ export async function get<T>(path: string, params?: Record<string, string | numb
       .join('&')
     if (q) url += `?${q}`
   }
-  const res = await fetch(url, { headers: authHeaders() })
+  const res = await fetchWithAuth(url, {})
   return handleResponse<T>(res)
 }
 
 export async function post<T>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchWithAuth(`${BASE}${path}`, {
     method: 'POST',
-    headers: authHeaders(),
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
   return handleResponse<T>(res)
 }
 
 export async function put<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchWithAuth(`${BASE}${path}`, {
     method: 'PUT',
-    headers: authHeaders(),
     body: JSON.stringify(body),
   })
   return handleResponse<T>(res)
 }
 
 export async function patch<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchWithAuth(`${BASE}${path}`, {
     method: 'PATCH',
-    headers: authHeaders(),
     body: JSON.stringify(body),
   })
   return handleResponse<T>(res)
 }
 
 export async function del<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    method: 'DELETE',
-    headers: authHeaders(),
-  })
+  const res = await fetchWithAuth(`${BASE}${path}`, { method: 'DELETE' })
   return handleResponse<T>(res)
 }
 
 /** GET a binary response (e.g. CSV download) with the Bearer token attached. */
 export async function getBlob(path: string): Promise<Blob> {
-  const res = await fetch(`${BASE}${path}`, { headers: authHeaders() })
+  const res = await fetchWithAuth(`${BASE}${path}`, {})
   if (!res.ok) {
     let detail = res.statusText
     try { detail = (await res.json()).detail ?? detail } catch { /* ignore */ }
@@ -111,5 +127,14 @@ export async function postFormData<T>(path: string, formData: FormData): Promise
     headers,
     body: formData,
   })
+  // Retry on 401 for form data too
+  if (res.status === 401) {
+    const refreshed = await silentRefresh()
+    if (!refreshed) { clearSessionTokens(); window.location.href = '/'; throw new Error('Session expired') }
+    const retryHeaders: Record<string, string> = {}
+    if (_accessToken) retryHeaders['Authorization'] = `Bearer ${_accessToken}`
+    const retry = await fetch(`${BASE}${path}`, { method: 'POST', headers: retryHeaders, body: formData })
+    return handleResponse<T>(retry)
+  }
   return handleResponse<T>(res)
 }
