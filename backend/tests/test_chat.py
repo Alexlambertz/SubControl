@@ -52,15 +52,24 @@ class TestChatEndpoint:
     """Tests for POST /api/chat/message."""
 
     async def test_chat_no_ai_url_returns_config_message(self, client: AsyncClient):
-        """When ai_api_url is empty, returns a configuration prompt."""
-        # Ensure ai_api_url is blank (default from seeded settings)
-        res = await client.post(
-            "/api/chat/message",
-            json={"message": "Hello"},
-        )
-        assert res.status_code == 200
-        body = res.text
-        assert "not configured" in body.lower() or "ai_api_url" in body.lower()
+        """When ai_api_url is empty in both DB and env, returns a config prompt."""
+        import backend.config as cfg
+        # Blank out both the DB value and the env-var fallback so neither
+        # source provides a URL, which should trigger the "not configured" path.
+        original_url = cfg.settings.ai_api_url
+        cfg.settings.ai_api_url = ""
+        try:
+            # Ensure DB entry is also blank
+            await client.put("/api/settings/ai_api_url", json={"value": ""})
+            res = await client.post(
+                "/api/chat/message",
+                json={"message": "Hello"},
+            )
+            assert res.status_code == 200
+            body = res.text
+            assert "not configured" in body.lower() or "ai_api_url" in body.lower()
+        finally:
+            cfg.settings.ai_api_url = original_url
 
     async def test_chat_streams_response(self, client: AsyncClient):
         """With a mocked OpenAI client, SSE chunks are streamed."""

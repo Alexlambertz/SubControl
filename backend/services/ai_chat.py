@@ -664,11 +664,11 @@ async def stream_chat_response(
         return
 
     # ------------------------------------------------------------------
-    # 2. Resolve AI config (env > DB)
+    # 2. Resolve AI config (DB overrides env; env is the default fallback)
     # ------------------------------------------------------------------
-    api_url = env_cfg.ai_api_url or db_settings.get("ai_api_url", "")
-    api_key = env_cfg.ai_api_key or db_settings.get("ai_api_key", "") or "none"
-    model = env_cfg.ai_model or db_settings.get("ai_model", "") or "gpt-4o-mini"
+    api_url = db_settings.get("ai_api_url", "") or env_cfg.ai_api_url
+    api_key = db_settings.get("ai_api_key", "") or env_cfg.ai_api_key or "none"
+    model = db_settings.get("ai_model", "") or env_cfg.ai_model or "gpt-4o-mini"
 
     if not api_url:
         yield 'data: {"content": "AI is not configured. Set ai_api_url in Settings."}\n\n'
