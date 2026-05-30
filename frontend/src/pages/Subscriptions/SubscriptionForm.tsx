@@ -7,17 +7,18 @@ import type { ReactNode } from 'react'
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { X } from 'lucide-react'
 import { subscriptionsApi } from '../../api/subscriptions'
+import { get } from '../../api/client'
 import type { Subscription, RecurringInterval } from '../../types'
 import { INTERVAL_LABELS } from '../../types'
 
-// Lazy-load providers/categories lists
-async function fetchProviders() {
-  const res = await fetch('/api/providers')
-  return res.json() as Promise<{ id: number; name: string }[]>
+// Lazy-load providers/categories lists — must use authenticated client
+async function fetchProviders(): Promise<{ id: number; name: string }[]> {
+  const data = await get<{ id: number; name: string }[] | unknown>('/api/providers')
+  return Array.isArray(data) ? data : []
 }
-async function fetchCategories() {
-  const res = await fetch('/api/categories')
-  return res.json() as Promise<{ id: number; name: string }[]>
+async function fetchCategories(): Promise<{ id: number; name: string }[]> {
+  const data = await get<{ id: number; name: string }[] | unknown>('/api/categories')
+  return Array.isArray(data) ? data : []
 }
 
 const INPUT_CLS =
