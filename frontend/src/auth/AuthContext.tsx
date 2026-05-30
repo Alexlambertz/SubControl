@@ -1,16 +1,39 @@
 /**
- * AuthContext — provides current user and auth state to the whole app.
+ * AuthContext — OIDC-backed authentication for SubControl.
  *
- * In development (DEV_MODE detected by the app returning a user without a token),
- * authentication is treated as always-passing.
+ * Startup sequence
+ * ----------------
+ * 1. Fetch /api/config to discover dev_mode + OIDC settings.
+ * 2. DEV_MODE=true  → call /api/auth/me directly (no token needed).
+ * 3. DEV_MODE=false → use oidc-client-ts:
+ *    a. If already at /auth/callback — let the callback page handle it.
+ *    b. Restore existing session from sessionStorage (getUser).
+ *    c. If valid token found  → set Bearer header, call /api/auth/login.
+ *    d. If no/expired session → signinRedirect() to Keycloak.
  *
- * In production the OIDC flow (via oidc-client-ts) handles login/logout.
+ * Token lifecycle
+ * ---------------
+ * The access token is stored in sessionStorage by oidc-client-ts and
+ * injected into every API request via setAccessToken() from api/client.ts.
+ * When the token expires the user is redirected to Keycloak for re-login.
  */
 
 import { createContext, useContext, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
+import { UserManager, WebStorageStateStore } from 'oidc-client-ts'
+import { setAccessToken } from '../api/client'
 import { usersApi } from '../api/users'
 import type { User } from '../types'
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface AppConfig {
+  dev_mode: boolean
+  oidc_issuer_url: string
+  oidc_client_id: string
+}
 
 interface AuthContextValue {
   user: User | null
@@ -19,6 +42,36 @@ interface AuthContextValue {
   login: () => void
   logout: () => void
 }
+
+// ---------------------------------------------------------------------------
+// Singleton UserManager — created once and reused across the session
+// ---------------------------------------------------------------------------
+
+let _userManager: UserManager | null = null
+
+/** Exposed so the AuthCallback page can reuse the same instance. */
+export function getUserManager(): UserManager | null {
+  return _userManager
+}
+
+function buildUserManager(config: AppConfig): UserManager {
+  _userManager = new UserManager({
+    authority: config.oidc_issuer_url,
+    client_id: config.oidc_client_id,
+    redirect_uri: `${window.location.origin}/auth/callback`,
+    post_logout_redirect_uri: `${window.location.origin}/`,
+    response_type: 'code',
+    scope: 'openid profile email',
+    userStore: new WebStorageStateStore({ store: window.sessionStorage }),
+    // Silent renew requires a dedicated /silent-renew.html; disabled for now.
+    automaticSilentRenew: false,
+  })
+  return _userManager
+}
+
+// ---------------------------------------------------------------------------
+// Context
+// ---------------------------------------------------------------------------
 
 const AuthContext = createContext<AuthContextValue>({
   user: null,
@@ -33,26 +86,73 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(true)
 
   useEffect(() => {
-    // Attempt to load the current user.
-    // In DEV_MODE the backend returns the dummy user without any token.
-    usersApi.me()
-      .then(setUser)
-      .catch(() => setUser(null))
-      .finally(() => setIsLoading(false))
+    let cancelled = false
+
+    async function init() {
+      try {
+        // 1. Discover runtime config (unauthenticated endpoint)
+        const resp = await fetch('/api/config')
+        if (!resp.ok) throw new Error(`/api/config returned ${resp.status}`)
+        const config: AppConfig = await resp.json()
+
+        // 2. DEV_MODE — backend accepts requests without a token
+        if (config.dev_mode) {
+          const u = await usersApi.me()
+          if (!cancelled) { setUser(u); setIsLoading(false) }
+          return
+        }
+
+        // 3. Production OIDC
+        //    If we're already at the callback URL let that page handle things.
+        if (window.location.pathname === '/auth/callback') {
+          if (!cancelled) setIsLoading(false)
+          return
+        }
+
+        const um = buildUserManager(config)
+
+        // Try to restore an existing (non-expired) session
+        const oidcUser = await um.getUser()
+        if (oidcUser && !oidcUser.expired) {
+          setAccessToken(oidcUser.access_token)
+          try {
+            const u = await usersApi.login()
+            if (!cancelled) { setUser(u); setIsLoading(false) }
+          } catch {
+            // Token might be stale — force re-login
+            setAccessToken(null)
+            await um.removeUser()
+            await um.signinRedirect({ state: window.location.pathname + window.location.search })
+          }
+          return
+        }
+
+        // No valid session → redirect to Keycloak (browser navigates away)
+        await um.signinRedirect({
+          state: window.location.pathname + window.location.search,
+        })
+        // Never reached after redirect
+      } catch (err) {
+        console.error('[Auth] init error:', err)
+        if (!cancelled) setIsLoading(false)
+      }
+    }
+
+    init()
+    return () => { cancelled = true }
   }, [])
 
   const login = async () => {
-    try {
-      const u = await usersApi.login()
-      setUser(u)
-    } catch (err) {
-      console.error('Login failed', err)
-    }
+    if (_userManager) await _userManager.signinRedirect()
   }
 
-  const logout = () => {
+  const logout = async () => {
     setUser(null)
-    // In production: clear OIDC session
+    setAccessToken(null)
+    if (_userManager) {
+      await _userManager.removeUser()
+      await _userManager.signoutRedirect()
+    }
   }
 
   return (

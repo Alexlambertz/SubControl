@@ -22,6 +22,17 @@ class Settings(BaseSettings):
 
     # OIDC / Keycloak
     oidc_issuer_url: str = "http://localhost:8080/realms/subcontrol"
+    """Issuer URL used by the *backend* to fetch JWKS and validate tokens."""
+
+    oidc_public_issuer_url: str = ""
+    """
+    Public-facing issuer URL sent to the *frontend* for the browser OIDC flow.
+    Set this when Keycloak is reachable by the backend on an internal Docker
+    hostname (e.g. http://keycloak:8080/…) but by the browser on a different
+    address (e.g. https://sso.example.com/…).
+    Defaults to OIDC_ISSUER_URL when empty.
+    """
+
     oidc_client_id: str = "subcontrol"
     oidc_client_secret: str = ""
 

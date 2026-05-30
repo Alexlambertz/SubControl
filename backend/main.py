@@ -113,7 +113,7 @@ def _register_routers(app: FastAPI) -> None:
     app.include_router(providers_categories.categories_router)
     app.include_router(search.router)
 
-    # Health check (no auth required)
+    # Health check + frontend config (no auth required)
     from fastapi import APIRouter
 
     health_router = APIRouter(tags=["system"])
@@ -121,6 +121,25 @@ def _register_routers(app: FastAPI) -> None:
     @health_router.get("/api/health")
     async def health_check() -> dict:  # type: ignore[return]
         return {"status": "ok", "version": _read_version()}
+
+    @health_router.get("/api/config")
+    async def get_config() -> dict:  # type: ignore[return]
+        """
+        Return public configuration consumed by the frontend at runtime.
+
+        This endpoint is intentionally unauthenticated so the browser can
+        bootstrap the OIDC flow before any token exists.
+        """
+        public_issuer = (
+            settings.oidc_public_issuer_url
+            if settings.oidc_public_issuer_url
+            else settings.oidc_issuer_url
+        )
+        return {
+            "dev_mode": settings.dev_mode,
+            "oidc_issuer_url": public_issuer,
+            "oidc_client_id": settings.oidc_client_id,
+        }
 
     app.include_router(health_router)
 

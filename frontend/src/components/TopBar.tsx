@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
-import { Search, User } from 'lucide-react'
+import { Search, User, LogOut } from 'lucide-react'
 
 const PAGE_TITLES: Record<string, string> = {
   '/': 'Dashboard',
@@ -19,7 +19,7 @@ const PAGE_TITLES: Record<string, string> = {
 
 export default function TopBar() {
   const { pathname } = useLocation()
-  const { user } = useAuth()
+  const { user, logout } = useAuth()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const inputRef = useRef<HTMLInputElement>(null)
@@ -93,6 +93,13 @@ export default function TopBar() {
               admin
             </span>
           )}
+          <button
+            onClick={logout}
+            className="ml-1 p-1.5 text-gray-400 hover:text-red-500 rounded-lg hover:bg-red-50 transition"
+            title="Sign out"
+          >
+            <LogOut size={15} />
+          </button>
         </div>
       )}
     </header>
