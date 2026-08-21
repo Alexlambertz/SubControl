@@ -15,6 +15,7 @@ import IntervalBadge from '../../components/IntervalBadge'
 import CurrencyDisplay from '../../components/CurrencyDisplay'
 import ConfirmDialog from '../../components/ConfirmDialog'
 import DuplicatesPanel from '../../components/DuplicatesPanel'
+import BucketTabs from '../../components/BucketTabs'
 import SubscriptionForm from './SubscriptionForm'
 import CsvImport from './CsvImport'
 import type { Subscription } from '../../types'
@@ -169,6 +170,8 @@ export default function SubscriptionList() {
           <span>/</span>
           <span className="font-medium text-gray-800">{bucket?.name ?? '…'}</span>
         </div>
+
+        <BucketTabs bucketId={bucketId} />
 
         <div className="flex items-center gap-2 flex-wrap">
           {/* Duplicate indicator */}

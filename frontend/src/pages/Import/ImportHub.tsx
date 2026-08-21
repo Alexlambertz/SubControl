@@ -8,10 +8,12 @@
 
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { FileText, Globe, Upload, Download, CheckCircle, AlertCircle } from 'lucide-react'
+import { FileText, Globe, Upload, Download, CheckCircle, AlertCircle, Shield, Sparkles } from 'lucide-react'
 import { bucketsApi } from '../../api/buckets'
 import { subscriptionsApi } from '../../api/subscriptions'
 import WallosImport from './WallosImport'
+import FindInsurancesPanel from './FindInsurancesPanel'
+import AiDocumentImportPanel from './AiDocumentImportPanel'
 import type { ImportResult } from '../../types'
 
 // ---------------------------------------------------------------------------
@@ -19,9 +21,11 @@ import type { ImportResult } from '../../types'
 // ---------------------------------------------------------------------------
 
 const TABS = [
-  { id: 'csv',    label: 'CSV Import', icon: FileText },
-  { id: 'wallos', label: 'WallOS',     icon: Globe },
-  { id: 'export', label: 'Export',     icon: Download },
+  { id: 'csv',              label: 'CSV Import',        icon: FileText },
+  { id: 'wallos',           label: 'WallOS',            icon: Globe },
+  { id: 'find-insurances',  label: 'Find Insurances',   icon: Shield },
+  { id: 'ai-document',      label: 'AI Document Import', icon: Sparkles },
+  { id: 'export',           label: 'Export',            icon: Download },
 ] as const
 
 type TabId = (typeof TABS)[number]['id']
@@ -269,9 +273,11 @@ export default function ImportHub() {
       </div>
 
       {/* Panel */}
-      {activeTab === 'csv'    && <CsvImportPanel />}
-      {activeTab === 'wallos' && <WallosImport />}
-      {activeTab === 'export' && <ExportPanel />}
+      {activeTab === 'csv'             && <CsvImportPanel />}
+      {activeTab === 'wallos'          && <WallosImport />}
+      {activeTab === 'find-insurances' && <FindInsurancesPanel />}
+      {activeTab === 'ai-document'     && <AiDocumentImportPanel />}
+      {activeTab === 'export'          && <ExportPanel />}
     </div>
   )
 }

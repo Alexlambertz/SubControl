@@ -8,7 +8,7 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
   AreaChart, Area, CartesianGrid, ReferenceLine,
 } from 'recharts'
-import { TrendingUp, Filter, X, CalendarDays } from 'lucide-react'
+import { TrendingUp, Filter, X, CalendarDays, Shield } from 'lucide-react'
 import { dashboardApi } from '../api/dashboard'
 import { bucketsApi } from '../api/buckets'
 import CurrencyDisplay from '../components/CurrencyDisplay'
@@ -337,7 +337,14 @@ export default function Dashboard() {
                     <tbody className="divide-y divide-gray-50">
                       {visible.map((s, i) => (
                         <tr key={i}>
-                          <td className="py-2 pr-4 text-gray-700">{s.name}</td>
+                          <td className="py-2 pr-4 text-gray-700">
+                            <span className="inline-flex items-center gap-1.5">
+                              {s.kind === 'insurance' && (
+                                <Shield size={13} className="text-blue-400 shrink-0" />
+                              )}
+                              {s.name}
+                            </span>
+                          </td>
                           <td className="py-2 text-right font-medium">
                             <CurrencyDisplay amount={s.monthly_amount} currency={s.currency} />
                           </td>

@@ -20,6 +20,7 @@ dependencies = [
     "openai>=1.30",
     "python-dateutil>=2.9",
     "mcp>=1.0",
+    "pypdf>=4.0",
 ]
 
 [project.optional-dependencies]

@@ -299,6 +299,7 @@ def build_average_summary(
                 "monthly_amount": round(monthly, 2),
                 "currency": sub["currency"],
                 "category": cat,
+                "kind": sub.get("kind", "subscription"),
             }
         )
         by_cat[cat] = by_cat.get(cat, 0.0) + monthly
@@ -351,6 +352,7 @@ def build_real_summary(subscriptions: list[dict], year: int, month: int) -> dict
                     "monthly_amount": round(sub["amount"], 2),
                     "currency": sub["currency"],
                     "category": cat,
+                    "kind": sub.get("kind", "subscription"),
                 }
             )
             by_cat[cat] = by_cat.get(cat, 0.0) + sub["amount"]

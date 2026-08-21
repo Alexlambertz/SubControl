@@ -44,6 +44,7 @@ class SubscriptionSummaryItem(BaseModel):
     monthly_amount: float
     currency: str
     category: str = "Uncategorized"
+    kind: str = "subscription"
 
 
 class CategoryTotal(BaseModel):
@@ -85,34 +86,33 @@ async def get_dashboard(
                 status_code=422, detail="'month' must be in YYYY-MM format"
             )
 
-    # Build dynamic WHERE clause — always scope to the user's accessible buckets
-    conditions: list[str] = []
-    params: list = []
+    # Verify bucket access once, up front, shared by both queries below
+    if bucket_id and not user.is_admin:
+        async with db.execute(
+            "SELECT 1 FROM user_buckets WHERE user_id = ? AND bucket_id = ?",
+            (user.id, bucket_id),
+        ) as cur:
+            if await cur.fetchone() is None:
+                raise HTTPException(status_code=403, detail="Access denied to this bucket")
 
-    if not user.is_admin:
-        conditions.append(
-            "s.bucket_id IN (SELECT bucket_id FROM user_buckets WHERE user_id = ?)"
-        )
-        params.append(user.id)
-
-    if bucket_id:
-        # Verify the user actually has access to this specific bucket
+    def _scope(alias: str) -> tuple[str, list]:
+        """Build a WHERE clause + params scoping *alias* to the user's buckets."""
+        conditions: list[str] = []
+        params: list = []
         if not user.is_admin:
-            async with db.execute(
-                "SELECT 1 FROM user_buckets WHERE user_id = ? AND bucket_id = ?",
-                (user.id, bucket_id),
-            ) as cur:
-                if await cur.fetchone() is None:
-                    raise HTTPException(status_code=403, detail="Access denied to this bucket")
-        conditions.append("s.bucket_id = ?")
-        params.append(bucket_id)
+            conditions.append(
+                f"{alias}.bucket_id IN (SELECT bucket_id FROM user_buckets WHERE user_id = ?)"
+            )
+            params.append(user.id)
+        if bucket_id:
+            conditions.append(f"{alias}.bucket_id = ?")
+            params.append(bucket_id)
+        if category_id is not None:
+            conditions.append(f"{alias}.category_id = ?")
+            params.append(category_id)
+        return (" AND ".join(conditions) if conditions else "1=1"), params
 
-    if category_id is not None:
-        conditions.append("s.category_id = ?")
-        params.append(category_id)
-
-    where = " AND ".join(conditions) if conditions else "1=1"
-
+    sub_where, sub_params = _scope("s")
     async with db.execute(
         f"""
         SELECT s.name, s.amount, s.currency,
@@ -120,13 +120,27 @@ async def get_dashboard(
                c.name AS category_name
         FROM subscriptions s
         LEFT JOIN categories c ON s.category_id = c.id
-        WHERE {where}
+        WHERE {sub_where}
         """,
-        params,
+        sub_params,
     ) as cur:
         rows = await cur.fetchall()
+    items = [{**dict(r), "kind": "subscription"} for r in rows]
 
-    subscriptions = [dict(r) for r in rows]
+    ins_where, ins_params = _scope("i")
+    async with db.execute(
+        f"""
+        SELECT i.name, i.amount, i.currency,
+               i.recurring_interval, i.recurring_date, i.end_date, i.created_at,
+               c.name AS category_name
+        FROM insurances i
+        LEFT JOIN categories c ON i.category_id = c.id
+        WHERE {ins_where}
+        """,
+        ins_params,
+    ) as cur:
+        rows = await cur.fetchall()
+    items += [{**dict(r), "kind": "insurance"} for r in rows]
 
     from datetime import date as _date
     from backend.services.dashboard import build_average_summary, build_real_summary
@@ -136,10 +150,10 @@ async def get_dashboard(
         if month and re.match(r"^\d{4}-\d{2}$", month):
             year_ref, mon_ref = int(month[:4]), int(month[5:7])
             reference_date = _date(year_ref, mon_ref, 1)
-        summary = build_average_summary(subscriptions, reference_date=reference_date)
+        summary = build_average_summary(items, reference_date=reference_date)
     else:
         year, mon = int(month[:4]), int(month[5:7])
-        summary = build_real_summary(subscriptions, year, mon)
+        summary = build_real_summary(items, year, mon)
 
     return DashboardResponse(**summary)
 
@@ -173,28 +187,28 @@ async def get_yearly_dashboard(
     Subscriptions are fetched once and the real-monthly calculation is
     applied 12 times (one per calendar month) in Python — no 12× DB round-trips.
     """
-    conditions: list[str] = []
-    params: list = []
+    if bucket_id and not user.is_admin:
+        async with db.execute(
+            "SELECT 1 FROM user_buckets WHERE user_id = ? AND bucket_id = ?",
+            (user.id, bucket_id),
+        ) as cur:
+            if await cur.fetchone() is None:
+                raise HTTPException(status_code=403, detail="Access denied to this bucket")
 
-    if not user.is_admin:
-        conditions.append(
-            "s.bucket_id IN (SELECT bucket_id FROM user_buckets WHERE user_id = ?)"
-        )
-        params.append(user.id)
-
-    if bucket_id:
+    def _scope(alias: str) -> tuple[str, list]:
+        conditions: list[str] = []
+        params: list = []
         if not user.is_admin:
-            async with db.execute(
-                "SELECT 1 FROM user_buckets WHERE user_id = ? AND bucket_id = ?",
-                (user.id, bucket_id),
-            ) as cur:
-                if await cur.fetchone() is None:
-                    raise HTTPException(status_code=403, detail="Access denied to this bucket")
-        conditions.append("s.bucket_id = ?")
-        params.append(bucket_id)
+            conditions.append(
+                f"{alias}.bucket_id IN (SELECT bucket_id FROM user_buckets WHERE user_id = ?)"
+            )
+            params.append(user.id)
+        if bucket_id:
+            conditions.append(f"{alias}.bucket_id = ?")
+            params.append(bucket_id)
+        return (" AND ".join(conditions) if conditions else "1=1"), params
 
-    where = " AND ".join(conditions) if conditions else "1=1"
-
+    sub_where, sub_params = _scope("s")
     async with db.execute(
         f"""
         SELECT s.name, s.amount, s.currency,
@@ -202,17 +216,31 @@ async def get_yearly_dashboard(
                c.name AS category_name
         FROM subscriptions s
         LEFT JOIN categories c ON s.category_id = c.id
-        WHERE {where}
+        WHERE {sub_where}
         """,
-        params,
+        sub_params,
     ) as cur:
         rows = await cur.fetchall()
+    items = [dict(r) for r in rows]
 
-    subscriptions = [dict(r) for r in rows]
+    ins_where, ins_params = _scope("i")
+    async with db.execute(
+        f"""
+        SELECT i.name, i.amount, i.currency,
+               i.recurring_interval, i.recurring_date, i.end_date, i.created_at,
+               c.name AS category_name
+        FROM insurances i
+        LEFT JOIN categories c ON i.category_id = c.id
+        WHERE {ins_where}
+        """,
+        ins_params,
+    ) as cur:
+        rows = await cur.fetchall()
+    items += [dict(r) for r in rows]
 
     from backend.services.dashboard import build_yearly_totals
 
-    totals = build_yearly_totals(subscriptions, year)   # 12 values, index 0 = Jan
+    totals = build_yearly_totals(items, year)   # 12 values, index 0 = Jan
 
     months: list[MonthTotal] = [
         MonthTotal(

@@ -45,6 +45,32 @@ export interface Provider {
   name: string
 }
 
+export interface InsuranceAttachment {
+  id: string
+  filename: string
+  content_type: string
+  size_bytes: number
+  uploaded_at: string
+}
+
+export interface Insurance {
+  id: string
+  bucket_id: string
+  name: string
+  insurer: string
+  policy_number: string | null
+  recurring_interval: RecurringInterval
+  recurring_date: string | null
+  end_date: string | null
+  amount: number
+  currency: string
+  category_name: string | null
+  notes: string | null
+  created_at: string
+  updated_at: string
+  attachments: InsuranceAttachment[]
+}
+
 export interface Category {
   id: number
   name: string
@@ -55,6 +81,7 @@ export interface SubscriptionSummaryItem {
   monthly_amount: number
   currency: string
   category: string
+  kind: 'subscription' | 'insurance'
 }
 
 export interface CategoryTotal {
@@ -94,6 +121,54 @@ export interface ChatMessage {
 export interface ImportResult {
   imported: number
   failed: Array<{ row: number; error: string }>
+}
+
+// ---------------------------------------------------------------------------
+// AI-assisted insurance discovery & document import
+// ---------------------------------------------------------------------------
+
+export type AiConfidence = 'high' | 'medium' | 'low'
+
+export interface InsuranceCandidate {
+  subscription_id: string
+  name: string
+  provider_name: string | null
+  amount: number
+  currency: string
+  recurring_interval: RecurringInterval
+  suggested_insurer: string
+  suggested_category: string
+  confidence: AiConfidence
+  reason: string
+}
+
+export interface MigrateToInsurancePayload {
+  insurer: string
+  policy_number?: string
+  category_name?: string
+  notes?: string
+}
+
+export type ExtractedRecordType = 'subscription' | 'insurance'
+
+export interface ExtractedRecordFields {
+  name?: string
+  provider_name?: string
+  insurer?: string
+  policy_number?: string
+  recurring_interval?: string
+  recurring_date?: string
+  end_date?: string
+  amount?: number
+  currency?: string
+  category_name?: string
+  notes?: string
+}
+
+export interface ExtractedRecord {
+  type: ExtractedRecordType
+  confidence: AiConfidence
+  fields: ExtractedRecordFields
 }
 
 // ---------------------------------------------------------------------------

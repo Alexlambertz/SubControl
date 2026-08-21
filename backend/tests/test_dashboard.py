@@ -499,3 +499,80 @@ class TestYearlyDashboardEndpoint:
     async def test_invalid_year_rejected(self, client: AsyncClient) -> None:
         resp = await client.get("/api/dashboard/yearly?year=1999")
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Insurances merged into the same dashboard totals as subscriptions
+# ---------------------------------------------------------------------------
+
+
+async def _make_insurance(
+    client: AsyncClient,
+    bucket_id: str,
+    *,
+    name: str = "Insurance",
+    interval: str = "monthly",
+    recurring_date: str = "2024-01-15",
+    amount: float = 10.0,
+    category: str | None = None,
+) -> dict:
+    payload = dict(
+        name=name,
+        insurer=name,
+        recurring_interval=interval,
+        recurring_date=recurring_date,
+        amount=amount,
+    )
+    if category:
+        payload["category_name"] = category
+    r = await client.post(f"/api/buckets/{bucket_id}/insurances", json=payload)
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+class TestInsuranceDashboardIntegration:
+    async def test_average_total_includes_insurance(self, client: AsyncClient) -> None:
+        bid = await _make_bucket(client, "MixedAvg")
+        await _make_sub(client, bid, name="Sub", interval="monthly", amount=10.0)
+        await _make_insurance(client, bid, name="Ins", interval="monthly", amount=15.0)
+
+        resp = await client.get("/api/dashboard?mode=average")
+        body = resp.json()
+        assert body["total_monthly"] == pytest.approx(25.0, rel=0.01)
+
+        kinds = {s["name"]: s["kind"] for s in body["subscriptions"]}
+        assert kinds["Sub"] == "subscription"
+        assert kinds["Ins"] == "insurance"
+
+    async def test_by_category_blends_subscriptions_and_insurances(
+        self, client: AsyncClient
+    ) -> None:
+        bid = await _make_bucket(client, "MixedCategory")
+        await _make_sub(client, bid, name="Sub", amount=10.0, category="Home")
+        await _make_insurance(client, bid, name="Ins", amount=15.0, category="Home")
+
+        resp = await client.get("/api/dashboard?mode=average")
+        by_cat = {c["category"]: c["total"] for c in resp.json()["by_category"]}
+        assert by_cat["Home"] == pytest.approx(25.0, rel=0.01)
+
+    async def test_real_mode_includes_insurance_due_in_month(
+        self, client: AsyncClient
+    ) -> None:
+        bid = await _make_bucket(client, "MixedReal")
+        await _make_insurance(
+            client, bid, name="Ins", interval="monthly",
+            recurring_date="2024-01-15", amount=15.0,
+        )
+        resp = await client.get("/api/dashboard?mode=real&month=2024-02")
+        names = [s["name"] for s in resp.json()["subscriptions"]]
+        assert "Ins" in names
+
+    async def test_yearly_totals_include_insurance(self, client: AsyncClient) -> None:
+        bid = await _make_bucket(client, "MixedYearly")
+        await _make_insurance(
+            client, bid, name="Ins", interval="monthly",
+            recurring_date="2025-01-01", amount=15.0,
+        )
+        resp = await client.get("/api/dashboard/yearly?year=2025")
+        months = {m["label"]: m["total"] for m in resp.json()["months"]}
+        assert months["Jan"] == pytest.approx(15.0)

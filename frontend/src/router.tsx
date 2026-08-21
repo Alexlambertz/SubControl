@@ -9,6 +9,7 @@ import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
 import BucketList from './pages/Buckets/BucketList'
 import SubscriptionList from './pages/Subscriptions/SubscriptionList'
+import InsuranceList from './pages/Insurances/InsuranceList'
 import UserList from './pages/Users/UserList'
 import Chat from './pages/Chat'
 import Settings from './pages/Settings'
@@ -77,6 +78,10 @@ const router = createBrowserRouter([
           {
             path: 'buckets/:bucketId/subscriptions',
             element: <SubscriptionList />,
+          },
+          {
+            path: 'buckets/:bucketId/insurances',
+            element: <InsuranceList />,
           },
           {
             path: 'subscriptions',
