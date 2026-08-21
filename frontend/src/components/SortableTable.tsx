@@ -9,7 +9,7 @@
  *   />
  */
 
-import React, { useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import { ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react'
 
 export interface Column<T> {
@@ -49,13 +49,17 @@ export default function SortableTable<T extends Record<string, unknown>>({
     }
   }
 
-  const sorted = [...data].sort((a, b) => {
-    if (!sortKey || !sortDir) return 0
-    const av = a[sortKey] ?? ''
-    const bv = b[sortKey] ?? ''
-    const cmp = String(av).localeCompare(String(bv), undefined, { numeric: true })
-    return sortDir === 'asc' ? cmp : -cmp
-  })
+  const sorted = useMemo(
+    () =>
+      [...data].sort((a, b) => {
+        if (!sortKey || !sortDir) return 0
+        const av = a[sortKey] ?? ''
+        const bv = b[sortKey] ?? ''
+        const cmp = String(av).localeCompare(String(bv), undefined, { numeric: true })
+        return sortDir === 'asc' ? cmp : -cmp
+      }),
+    [data, sortKey, sortDir],
+  )
 
   return (
     <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">

@@ -1,31 +1,51 @@
 """
-Subscriptions router — CRUD for subscriptions within a bucket.
+Subscriptions router — CRUD for subscriptions within a bucket, plus
+attachment upload/download/delete (e.g. a signup confirmation or renewal
+letter).
 
 Routes
 ------
-GET    /api/buckets/{bucket_id}/subscriptions              List subscriptions
-POST   /api/buckets/{bucket_id}/subscriptions              Create subscription
-GET    /api/buckets/{bucket_id}/subscriptions/{sub_id}     Get single subscription
-PUT    /api/buckets/{bucket_id}/subscriptions/{sub_id}     Update subscription
-DELETE /api/buckets/{bucket_id}/subscriptions/{sub_id}     Delete subscription
+GET    /api/buckets/{bucket_id}/subscriptions                                  List subscriptions
+POST   /api/buckets/{bucket_id}/subscriptions                                  Create subscription
+GET    /api/buckets/{bucket_id}/subscriptions/{sub_id}                         Get single subscription
+PUT    /api/buckets/{bucket_id}/subscriptions/{sub_id}                         Update subscription
+DELETE /api/buckets/{bucket_id}/subscriptions/{sub_id}                         Delete subscription
+POST   /api/buckets/{bucket_id}/subscriptions/{sub_id}/attachments             Upload attachment
+GET    /api/buckets/{bucket_id}/subscriptions/{sub_id}/attachments/{id}        Download attachment
+DELETE /api/buckets/{bucket_id}/subscriptions/{sub_id}/attachments/{id}        Delete attachment
 
 Provider and Category records are created on-the-fly when a new name is supplied.
 Logo URLs are fetched asynchronously after create/update (fire-and-forget).
+Every attachment upload is best-effort analyzed by AI and compared against
+the subscription's current field values (see analyze_attachment_for_updates
+in services/ai_extract.py) — analysis never blocks the upload itself.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import aiosqlite
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, field_validator
 
 from backend.database import get_db
 from backend.dependencies import CurrentUser, get_current_user
+from backend.services.ai_extract import analyze_attachment_for_updates
+from backend.services.attachments import (
+    attachments_dir,
+    delete_attachment_file,
+    save_attachment,
+)
+from backend.services.history import (
+    SUBSCRIPTION_HISTORY_FIELDS,
+    HistoryEntryResponse,
+    get_history,
+    record_changes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +107,19 @@ class SubscriptionUpdate(BaseModel):
         return v
 
 
+class AttachmentResponse(BaseModel):
+    id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    uploaded_at: str
+
+
+class AttachmentUploadResult(BaseModel):
+    attachment: AttachmentResponse
+    suggested_updates: dict[str, Any] = {}
+
+
 class SubscriptionResponse(BaseModel):
     id: str
     bucket_id: str
@@ -101,6 +134,7 @@ class SubscriptionResponse(BaseModel):
     category_name: Optional[str] = None
     created_at: str
     updated_at: str
+    attachments: list[AttachmentResponse] = []
 
 
 # ---------------------------------------------------------------------------
@@ -134,10 +168,10 @@ async def _get_sub_or_404(
     async with db.execute(
         """
         SELECT s.id, s.bucket_id, s.name,
-               p.name AS provider_name,
+               s.provider_id, p.name AS provider_name,
                s.recurring_interval, s.recurring_date, s.end_date,
                s.amount, s.currency, s.image_url,
-               c.name AS category_name,
+               s.category_id, c.name AS category_name,
                s.created_at, s.updated_at
         FROM subscriptions s
         LEFT JOIN providers p ON s.provider_id = p.id
@@ -149,6 +183,37 @@ async def _get_sub_or_404(
         row = await cur.fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Subscription not found")
+    return dict(row)
+
+
+async def _get_attachments(sub_id: str, db: aiosqlite.Connection) -> list[dict]:
+    async with db.execute(
+        """
+        SELECT id, filename, content_type, size_bytes, uploaded_at
+        FROM subscription_attachments
+        WHERE subscription_id = ?
+        ORDER BY uploaded_at
+        """,
+        (sub_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def _get_attachment_or_404(
+    sub_id: str, attachment_id: str, db: aiosqlite.Connection
+) -> dict:
+    async with db.execute(
+        """
+        SELECT id, subscription_id, filename, content_type, size_bytes, storage_path, uploaded_at
+        FROM subscription_attachments
+        WHERE id = ? AND subscription_id = ?
+        """,
+        (attachment_id, sub_id),
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
     return dict(row)
 
 
@@ -237,8 +302,29 @@ async def list_subscriptions(
         """,
         (bucket_id,),
     ) as cur:
-        rows = await cur.fetchall()
-    return [SubscriptionResponse(**dict(r)) for r in rows]
+        rows = [dict(r) for r in await cur.fetchall()]
+
+    # Fetch attachments for every subscription in one query, then group in
+    # Python instead of issuing one query per subscription.
+    attachments_by_sub: dict[str, list[dict]] = {}
+    if rows:
+        async with db.execute(
+            """
+            SELECT a.id, a.subscription_id, a.filename, a.content_type, a.size_bytes, a.uploaded_at
+            FROM subscription_attachments a
+            JOIN subscriptions s ON a.subscription_id = s.id
+            WHERE s.bucket_id = ?
+            ORDER BY a.uploaded_at
+            """,
+            (bucket_id,),
+        ) as cur:
+            for a in await cur.fetchall():
+                attachments_by_sub.setdefault(a["subscription_id"], []).append(dict(a))
+
+    return [
+        SubscriptionResponse(**r, attachments=attachments_by_sub.get(r["id"], []))
+        for r in rows
+    ]
 
 
 @router.post(
@@ -312,7 +398,9 @@ async def get_subscription(
     db: aiosqlite.Connection = Depends(get_db),
 ) -> SubscriptionResponse:
     await _check_bucket_access(bucket_id, user, db)
-    return SubscriptionResponse(**await _get_sub_or_404(bucket_id, sub_id, db))
+    existing = await _get_sub_or_404(bucket_id, sub_id, db)
+    attachments = await _get_attachments(sub_id, db)
+    return SubscriptionResponse(**existing, attachments=attachments)
 
 
 @router.put(
@@ -329,28 +417,31 @@ async def update_subscription(
     await _check_bucket_access(bucket_id, user, db)
     existing = await _get_sub_or_404(bucket_id, sub_id, db)
 
-    # Resolve provider
-    provider_id: Optional[int] = None
-    if body.provider_name is not None:
-        provider_id = await _get_or_create_provider(body.provider_name, db)
-    else:
-        # Keep existing provider
-        async with db.execute(
-            "SELECT provider_id FROM subscriptions WHERE id = ?", (sub_id,)
-        ) as cur:
-            prow = await cur.fetchone()
-        provider_id = prow["provider_id"] if prow else None
+    # Fields the client actually sent (present in the JSON body, even if the
+    # value is null) — vs. fields simply omitted. A cleared date/category is
+    # sent as an explicit null; distinguishing the two is required to tell
+    # "clear this field" apart from "leave it alone" (both look like `None`
+    # once parsed, since Optional[...] fields default to None either way).
+    fields_set = body.model_fields_set
 
-    # Resolve category
-    category_id: Optional[int] = None
-    if body.category_name is not None:
-        category_id = await _get_or_create_category(body.category_name, db)
+    # Resolve provider — reuse the id already fetched by _get_sub_or_404
+    # instead of re-querying the row we just read.
+    provider_id: Optional[int] = (
+        await _get_or_create_provider(body.provider_name, db)
+        if body.provider_name is not None
+        else existing["provider_id"]
+    )
+
+    # Resolve category — same reuse, but a cleared (null) category must
+    # actually clear category_id rather than falling back to existing.
+    if "category_name" in fields_set:
+        category_id: Optional[int] = (
+            await _get_or_create_category(body.category_name, db)
+            if body.category_name
+            else None
+        )
     else:
-        async with db.execute(
-            "SELECT category_id FROM subscriptions WHERE id = ?", (sub_id,)
-        ) as cur:
-            crow = await cur.fetchone()
-        category_id = crow["category_id"] if crow else None
+        category_id = existing["category_id"]
 
     updates = {
         "name": body.name if body.name is not None else existing["name"],
@@ -362,18 +453,35 @@ async def update_subscription(
         ),
         "recurring_date": (
             body.recurring_date
-            if body.recurring_date is not None
+            if "recurring_date" in fields_set
             else existing["recurring_date"]
         ),
         "end_date": (
             body.end_date
-            if body.end_date is not None
+            if "end_date" in fields_set
             else existing.get("end_date")
         ),
         "amount": body.amount if body.amount is not None else existing["amount"],
         "currency": body.currency if body.currency is not None else existing["currency"],
         "category_id": category_id,
         "image_url": body.image_url if body.image_url is not None else existing.get("image_url"),
+    }
+
+    # Human-readable versions of the same resolved values, for the change
+    # history log (the SQL updates above use internal FK ids instead).
+    new_display_values = {
+        "name": updates["name"],
+        "provider_name": (
+            body.provider_name if body.provider_name is not None else existing["provider_name"]
+        ),
+        "recurring_interval": updates["recurring_interval"],
+        "recurring_date": updates["recurring_date"],
+        "end_date": updates["end_date"],
+        "amount": updates["amount"],
+        "currency": updates["currency"],
+        "category_name": (
+            body.category_name if "category_name" in fields_set else existing["category_name"]
+        ),
     }
 
     await db.execute(
@@ -388,6 +496,16 @@ async def update_subscription(
         """,
         {**updates, "id": sub_id},
     )
+    await record_changes(
+        db,
+        table="subscription_history",
+        id_column="subscription_id",
+        entity_id=sub_id,
+        old_values=existing,
+        new_values=new_display_values,
+        fields=SUBSCRIPTION_HISTORY_FIELDS,
+        user=user,
+    )
     await db.commit()
 
     # Fire-and-forget logo refresh if provider changed
@@ -397,7 +515,9 @@ async def update_subscription(
             _update_logo(sub_id, body.provider_name, get_db_path())
         )
 
-    return SubscriptionResponse(**await _get_sub_or_404(bucket_id, sub_id, db))
+    refreshed = await _get_sub_or_404(bucket_id, sub_id, db)
+    attachments = await _get_attachments(sub_id, db)
+    return SubscriptionResponse(**refreshed, attachments=attachments)
 
 
 @router.delete(
@@ -413,5 +533,142 @@ async def delete_subscription(
 ) -> None:
     await _check_bucket_access(bucket_id, user, db)
     await _get_sub_or_404(bucket_id, sub_id, db)
+
+    async with db.execute(
+        "SELECT storage_path FROM subscription_attachments WHERE subscription_id = ?",
+        (sub_id,),
+    ) as cur:
+        storage_paths = [r["storage_path"] for r in await cur.fetchall()]
+
+    # ON DELETE CASCADE removes the subscription_attachments rows; delete the
+    # underlying files afterward so a failed unlink doesn't block the DB delete.
     await db.execute("DELETE FROM subscriptions WHERE id = ?", (sub_id,))
     await db.commit()
+
+    for path in storage_paths:
+        delete_attachment_file(path)
+
+
+# ---------------------------------------------------------------------------
+# Routes — attachments
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/api/buckets/{bucket_id}/subscriptions/{sub_id}/attachments",
+    response_model=AttachmentUploadResult,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_attachment(
+    bucket_id: str,
+    sub_id: str,
+    file: UploadFile,
+    user: CurrentUser = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+) -> AttachmentUploadResult:
+    await _check_bucket_access(bucket_id, user, db)
+    existing = await _get_sub_or_404(bucket_id, sub_id, db)
+
+    storage_path, filename, size_bytes = await save_attachment(sub_id, file)
+    content_type = file.content_type or "application/octet-stream"
+
+    async with db.execute(
+        """
+        INSERT INTO subscription_attachments
+            (subscription_id, filename, content_type, size_bytes, storage_path)
+        VALUES (?, ?, ?, ?, ?)
+        RETURNING id, filename, content_type, size_bytes, uploaded_at
+        """,
+        (sub_id, filename, content_type, size_bytes, storage_path),
+    ) as cur:
+        row = await cur.fetchone()
+    await db.commit()
+
+    suggested_updates = await analyze_attachment_for_updates(
+        db,
+        storage_path=storage_path,
+        filename=filename,
+        content_type=content_type,
+        existing_fields={
+            "name": existing["name"],
+            "provider_name": existing.get("provider_name"),
+            "recurring_interval": existing["recurring_interval"],
+            "recurring_date": existing.get("recurring_date"),
+            "end_date": existing.get("end_date"),
+            "amount": existing["amount"],
+            "currency": existing["currency"],
+            "category_name": existing.get("category_name"),
+        },
+        kind="subscription",
+    )
+
+    return AttachmentUploadResult(
+        attachment=AttachmentResponse(**dict(row)),
+        suggested_updates=suggested_updates,
+    )
+
+
+@router.get(
+    "/api/buckets/{bucket_id}/subscriptions/{sub_id}/attachments/{attachment_id}",
+)
+async def download_attachment(
+    bucket_id: str,
+    sub_id: str,
+    attachment_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+) -> FileResponse:
+    await _check_bucket_access(bucket_id, user, db)
+    await _get_sub_or_404(bucket_id, sub_id, db)
+    attachment = await _get_attachment_or_404(sub_id, attachment_id, db)
+
+    file_path = attachments_dir() / attachment["storage_path"]
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Attachment file missing on disk")
+
+    return FileResponse(
+        path=str(file_path),
+        media_type=attachment["content_type"],
+        filename=attachment["filename"],
+    )
+
+
+@router.delete(
+    "/api/buckets/{bucket_id}/subscriptions/{sub_id}/attachments/{attachment_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+)
+async def delete_attachment(
+    bucket_id: str,
+    sub_id: str,
+    attachment_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+) -> None:
+    await _check_bucket_access(bucket_id, user, db)
+    await _get_sub_or_404(bucket_id, sub_id, db)
+    attachment = await _get_attachment_or_404(sub_id, attachment_id, db)
+
+    await db.execute(
+        "DELETE FROM subscription_attachments WHERE id = ?", (attachment_id,)
+    )
+    await db.commit()
+
+    delete_attachment_file(attachment["storage_path"])
+
+
+@router.get(
+    "/api/buckets/{bucket_id}/subscriptions/{sub_id}/history",
+    response_model=list[HistoryEntryResponse],
+)
+async def get_subscription_history(
+    bucket_id: str,
+    sub_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+) -> list[dict]:
+    await _check_bucket_access(bucket_id, user, db)
+    await _get_sub_or_404(bucket_id, sub_id, db)
+    return await get_history(
+        db, table="subscription_history", id_column="subscription_id", entity_id=sub_id
+    )

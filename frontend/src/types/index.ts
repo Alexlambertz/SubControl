@@ -24,6 +24,19 @@ export type RecurringInterval =
   | 'half-year'
   | 'yearly'
 
+export interface Attachment {
+  id: string
+  filename: string
+  content_type: string
+  size_bytes: number
+  uploaded_at: string
+}
+
+export interface AttachmentUploadResult {
+  attachment: Attachment
+  suggested_updates: Record<string, string | number | null>
+}
+
 export interface Subscription {
   id: string
   bucket_id: string
@@ -38,19 +51,12 @@ export interface Subscription {
   category_name: string | null
   created_at: string
   updated_at: string
+  attachments: Attachment[]
 }
 
 export interface Provider {
   id: number
   name: string
-}
-
-export interface InsuranceAttachment {
-  id: string
-  filename: string
-  content_type: string
-  size_bytes: number
-  uploaded_at: string
 }
 
 export interface Insurance {
@@ -68,7 +74,7 @@ export interface Insurance {
   notes: string | null
   created_at: string
   updated_at: string
-  attachments: InsuranceAttachment[]
+  attachments: Attachment[]
 }
 
 export interface Category {
@@ -200,6 +206,15 @@ export type SearchResult = SearchResultBucket | SearchResultSubscription
 export interface SearchResponse {
   query: string
   results: SearchResult[]
+}
+
+export interface HistoryEntry {
+  id: string
+  field: string
+  old_value: string | null
+  new_value: string | null
+  changed_by_username: string
+  changed_at: string
 }
 
 /** Intervals displayed with human-readable labels */

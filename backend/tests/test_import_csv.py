@@ -71,6 +71,50 @@ class TestCsvImportValid:
         names = [p["name"] for p in providers_resp.json()]
         assert "UniqueProviderXYZ" in names
 
+    async def test_shared_provider_and_category_not_duplicated(
+        self, client: AsyncClient
+    ) -> None:
+        """
+        Multiple rows sharing a provider/category (both new and pre-existing)
+        must resolve to a single row each — a regression test for the
+        batched bulk-create path replacing the old per-row get-or-create.
+        """
+        bid = await _make_bucket(client, "ImportDedup")
+        # Pre-create one of the providers via a separate row first.
+        await client.post(
+            f"/api/buckets/{bid}/subscriptions/import",
+            files=_csv_file(
+                "name,provider,recurring_interval,recurring_date,amount,category\n"
+                "Existing,SharedProvider,monthly,2024-01-01,1.0,SharedCategory\n"
+            ),
+        )
+        csv_content = (
+            "name,provider,recurring_interval,recurring_date,amount,category\n"
+            "SubA,SharedProvider,monthly,2024-01-01,5.0,SharedCategory\n"
+            "SubB,SharedProvider,yearly,2024-02-01,50.0,SharedCategory\n"
+            "SubC,BrandNewProvider,weekly,2024-03-01,2.0,BrandNewCategory\n"
+        )
+        resp = await client.post(
+            f"/api/buckets/{bid}/subscriptions/import",
+            files=_csv_file(csv_content),
+        )
+        assert resp.json() == {"imported": 3, "failed": []}
+
+        providers_resp = await client.get("/api/providers")
+        provider_names = [p["name"] for p in providers_resp.json()]
+        assert provider_names.count("SharedProvider") == 1
+        assert provider_names.count("BrandNewProvider") == 1
+
+        categories_resp = await client.get("/api/categories")
+        category_names = [c["name"] for c in categories_resp.json()]
+        assert category_names.count("SharedCategory") == 1
+        assert category_names.count("BrandNewCategory") == 1
+
+        subs_resp = await client.get(f"/api/buckets/{bid}/subscriptions")
+        subs = {s["name"]: s for s in subs_resp.json()}
+        assert subs["SubA"]["category_name"] == "SharedCategory"
+        assert subs["SubC"]["category_name"] == "BrandNewCategory"
+
     async def test_currency_defaults_to_eur_when_omitted(
         self, client: AsyncClient
     ) -> None:

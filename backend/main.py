@@ -65,6 +65,9 @@ def create_app() -> FastAPI:
         logger.info("Migrations complete. SubControl is ready.")
         yield
 
+        from backend.database import close_db
+        await close_db(app)
+
     app = FastAPI(
         title="SubControl API",
         description="Subscription management REST API",

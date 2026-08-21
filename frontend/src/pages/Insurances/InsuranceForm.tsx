@@ -9,7 +9,9 @@ import { X, Paperclip, Upload, Download, Trash2, FileText } from 'lucide-react'
 import { insurancesApi } from '../../api/insurances'
 import { get } from '../../api/client'
 import DateField from '../../components/DateField'
-import type { Insurance, InsuranceAttachment, RecurringInterval } from '../../types'
+import FieldUpdateReview from '../../components/FieldUpdateReview'
+import ChangeHistory from '../../components/ChangeHistory'
+import type { Attachment, Insurance, RecurringInterval } from '../../types'
 import { INTERVAL_LABELS } from '../../types'
 
 async function fetchCategories(): Promise<{ id: number; name: string }[]> {
@@ -19,6 +21,19 @@ async function fetchCategories(): Promise<{ id: number; name: string }[]> {
 
 const INPUT_CLS =
   'w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white focus:ring-2 focus:ring-blue-500 outline-none'
+
+const FIELD_LABELS: Record<string, string> = {
+  name: 'Name',
+  insurer: 'Insurer',
+  policy_number: 'Policy number',
+  recurring_interval: 'Premium interval',
+  recurring_date: 'Last payment date',
+  end_date: 'End date',
+  amount: 'Amount',
+  currency: 'Currency',
+  category_name: 'Category',
+  notes: 'Notes',
+}
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -51,16 +66,17 @@ export default function InsuranceForm({ bucketId, insurance, onClose, onSaved }:
   const [notes, setNotes] = useState(insurance?.notes ?? '')
   const [error, setError] = useState('')
 
-  // Attachments — only manageable once the insurance exists (edit mode).
-  const [attachments, setAttachments] = useState<InsuranceAttachment[]>(
+  // Attachments — only manageable once the insurance exists (edit mode);
+  // a brand-new insurance is saved (and the modal closes) before it has an
+  // id to attach files to.
+  const [attachments, setAttachments] = useState<Attachment[]>(
     insurance?.attachments ?? [],
   )
-  const [savedInsuranceId, setSavedInsuranceId] = useState<string | null>(
-    insurance?.id ?? null,
-  )
+  const insuranceId = insurance?.id ?? null
   const [uploading, setUploading] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [attachError, setAttachError] = useState('')
+  const [suggestedUpdates, setSuggestedUpdates] = useState<Record<string, string | number | null> | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const { data: categories = [] } = useQuery({
@@ -73,41 +89,38 @@ export default function InsuranceForm({ bucketId, insurance, onClose, onSaved }:
       const data = {
         name,
         insurer,
-        policy_number: policyNumber || undefined,
+        // Explicit null (not undefined) so a cleared field is actually
+        // cleared on update — omitting the key would be indistinguishable
+        // from "leave this field alone" server-side.
+        policy_number: policyNumber || null,
         recurring_interval: interval,
-        recurring_date: recurringDate || undefined,
-        end_date: endDate || undefined,
+        recurring_date: recurringDate || null,
+        end_date: endDate || null,
         amount: parseFloat(amount),
         currency,
-        category_name: categoryName || undefined,
-        notes: notes || undefined,
+        category_name: categoryName || null,
+        notes: notes || null,
       }
       return isEdit
         ? insurancesApi.update(bucketId, insurance!.id, data)
         : insurancesApi.create(bucketId, data)
     },
-    onSuccess: (saved) => {
-      // Keep the form open after saving so the attachments panel unlocks —
-      // the user closes explicitly via the Done/Cancel button below.
-      setSavedInsuranceId(saved.id)
-      setError('')
-      qc.invalidateQueries({ queryKey: ['insurances', bucketId] })
-    },
+    onSuccess: onSaved,
     onError: (e: Error) => setError(e.message),
   })
 
   const handleFiles = async (files: FileList | null) => {
-    if (!files || files.length === 0 || !savedInsuranceId) return
+    if (!files || files.length === 0 || !insuranceId) return
     setAttachError('')
     setUploading(true)
     try {
       for (const file of Array.from(files)) {
-        const attachment = await insurancesApi.uploadAttachment(
-          bucketId,
-          savedInsuranceId,
-          file,
+        const result = await insurancesApi.uploadAttachment(bucketId, insuranceId, file)
+        setAttachments((prev) => [...prev, result.attachment])
+        // Last upload's suggestions win if multiple files are dropped at once.
+        setSuggestedUpdates(
+          Object.keys(result.suggested_updates).length > 0 ? result.suggested_updates : null,
         )
-        setAttachments((prev) => [...prev, attachment])
       }
       qc.invalidateQueries({ queryKey: ['insurances', bucketId] })
     } catch (e) {
@@ -118,9 +131,32 @@ export default function InsuranceForm({ bucketId, insurance, onClose, onSaved }:
   }
 
   const handleDeleteAttachment = async (attachmentId: string) => {
-    if (!savedInsuranceId) return
-    await insurancesApi.deleteAttachment(bucketId, savedInsuranceId, attachmentId)
+    if (!insuranceId) return
+    await insurancesApi.deleteAttachment(bucketId, insuranceId, attachmentId)
     setAttachments((prev) => prev.filter((a) => a.id !== attachmentId))
+    qc.invalidateQueries({ queryKey: ['insurances', bucketId] })
+  }
+
+  const currentFieldValues: Record<string, unknown> = {
+    name, insurer, policy_number: policyNumber, recurring_interval: interval,
+    recurring_date: recurringDate, end_date: endDate, amount, currency,
+    category_name: categoryName, notes,
+  }
+
+  const handleApplyUpdates = async (selected: Record<string, string | number | null>) => {
+    if (!insuranceId) return
+    const updated = await insurancesApi.update(bucketId, insuranceId, selected)
+    if ('name' in selected) setName(updated.name)
+    if ('insurer' in selected) setInsurer(updated.insurer)
+    if ('policy_number' in selected) setPolicyNumber(updated.policy_number ?? '')
+    if ('recurring_interval' in selected) setInterval(updated.recurring_interval)
+    if ('recurring_date' in selected) setRecurringDate(updated.recurring_date ?? '')
+    if ('end_date' in selected) setEndDate(updated.end_date ?? '')
+    if ('amount' in selected) setAmount(String(updated.amount))
+    if ('currency' in selected) setCurrency(updated.currency)
+    if ('category_name' in selected) setCategoryName(updated.category_name ?? '')
+    if ('notes' in selected) setNotes(updated.notes ?? '')
+    setSuggestedUpdates(null)
     qc.invalidateQueries({ queryKey: ['insurances', bucketId] })
   }
 
@@ -279,17 +315,17 @@ export default function InsuranceForm({ bucketId, insurance, onClose, onSaved }:
           <div className="flex justify-end gap-3 pt-2">
             <button
               type="button"
-              onClick={savedInsuranceId ? onSaved : onClose}
+              onClick={onClose}
               className="px-4 py-2 text-sm rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50"
             >
-              {savedInsuranceId ? 'Done' : 'Cancel'}
+              Cancel
             </button>
             <button
               type="submit"
               disabled={saveMut.isPending}
               className="px-4 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
             >
-              {saveMut.isPending ? 'Saving…' : savedInsuranceId ? 'Save changes' : 'Add insurance'}
+              {saveMut.isPending ? 'Saving…' : isEdit ? 'Save changes' : 'Add insurance'}
             </button>
           </div>
         </form>
@@ -303,9 +339,9 @@ export default function InsuranceForm({ bucketId, insurance, onClose, onSaved }:
             </h3>
           </div>
 
-          {!savedInsuranceId ? (
+          {!insuranceId ? (
             <p className="text-xs text-gray-400">
-              Save the insurance first to attach policy documents.
+              Save the insurance first, then edit it again to attach policy documents.
             </p>
           ) : (
             <div className="space-y-3">
@@ -320,7 +356,7 @@ export default function InsuranceForm({ bucketId, insurance, onClose, onSaved }:
                         type="button"
                         onClick={() =>
                           insurancesApi.downloadAttachment(
-                            bucketId, savedInsuranceId, a.id, a.filename,
+                            bucketId, insuranceId, a.id, a.filename,
                           )
                         }
                         className="p-1 text-gray-400 hover:text-blue-600 rounded transition shrink-0"
@@ -370,9 +406,28 @@ export default function InsuranceForm({ bucketId, insurance, onClose, onSaved }:
               </div>
 
               {attachError && <p className="text-xs text-red-500">{attachError}</p>}
+
+              {suggestedUpdates && (
+                <FieldUpdateReview
+                  updates={suggestedUpdates}
+                  currentValues={currentFieldValues}
+                  fieldLabels={FIELD_LABELS}
+                  onApply={handleApplyUpdates}
+                  onDismiss={() => setSuggestedUpdates(null)}
+                />
+              )}
             </div>
           )}
         </div>
+
+        {/* ── Change history ──────────────────────────────────────────────── */}
+        {isEdit && insuranceId && (
+          <ChangeHistory
+            queryKey={['insurance-history', bucketId, insuranceId]}
+            queryFn={() => insurancesApi.getHistory(bucketId, insuranceId)}
+            fieldLabels={FIELD_LABELS}
+          />
+        )}
       </div>
     </div>
   )

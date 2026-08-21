@@ -130,31 +130,16 @@ async def import_from_wallos(
         len(result["failed"]),
     )
 
-    # Fire logo fetches for all successfully imported subscriptions
+    # Fire logo fetches for all successfully imported subscriptions. Freshly
+    # imported rows always start with image_url IS NULL, so only_missing=True
+    # is equivalent to targeting just this import's rows.
     import asyncio
     from backend.database import get_db_path
-    from backend.services.logo_fetch import fetch_logo_url
-
-    db_path = get_db_path()
-
-    async def _fetch_logos() -> None:
-        async with aiosqlite.connect(db_path) as logo_db:
-            async with logo_db.execute(
-                "SELECT id, name FROM subscriptions WHERE bucket_id = ? ORDER BY created_at DESC LIMIT ?",
-                (body.bucket_id, result["imported"]),
-            ) as cur:
-                rows = await cur.fetchall()
-        for sub_id, sub_name in rows:
-            url = await fetch_logo_url(sub_name)
-            if url:
-                async with aiosqlite.connect(db_path) as logo_db:
-                    await logo_db.execute(
-                        "UPDATE subscriptions SET image_url = ? WHERE id = ?",
-                        (url, sub_id),
-                    )
-                    await logo_db.commit()
+    from backend.services.logo_fetch import refresh_logos_for_bucket
 
     if result["imported"] > 0:
-        asyncio.create_task(_fetch_logos())
+        asyncio.create_task(
+            refresh_logos_for_bucket(body.bucket_id, get_db_path(), only_missing=True)
+        )
 
     return ImportResult(**result)

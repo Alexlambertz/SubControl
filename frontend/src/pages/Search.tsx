@@ -6,7 +6,7 @@
  * navigates to the bucket's subscription list.
  */
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { FolderOpen, CreditCard, SearchX, Pencil, ExternalLink } from 'lucide-react'
@@ -59,8 +59,14 @@ export default function Search() {
     enabled: q.length > 0,
   })
 
-  const buckets = (data?.results.filter((r) => r.type === 'bucket') ?? []) as SearchResultBucket[]
-  const subscriptions = (data?.results.filter((r) => r.type === 'subscription') ?? []) as SearchResultSubscription[]
+  const buckets = useMemo(
+    () => (data?.results.filter((r) => r.type === 'bucket') ?? []) as SearchResultBucket[],
+    [data],
+  )
+  const subscriptions = useMemo(
+    () => (data?.results.filter((r) => r.type === 'subscription') ?? []) as SearchResultSubscription[],
+    [data],
+  )
   const total = buckets.length + subscriptions.length
 
   // ── Full subscription fetch for the edit form ─────────────────────────────
@@ -71,8 +77,9 @@ export default function Search() {
   })
 
   // ── Cost totals ───────────────────────────────────────────────────────────
-  const totalMonthly = subscriptions.reduce(
-    (acc, s) => acc + toMonthly(s.amount, s.recurring_interval), 0
+  const totalMonthly = useMemo(
+    () => subscriptions.reduce((acc, s) => acc + toMonthly(s.amount, s.recurring_interval), 0),
+    [subscriptions],
   )
   const totalYearly = totalMonthly * 12
 

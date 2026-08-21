@@ -20,7 +20,7 @@ share one category list.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
@@ -35,11 +35,21 @@ from backend.routers.subscriptions import (
     _get_bucket_or_404,
     _get_or_create_category,
 )
-from backend.services.ai_extract import detect_insurance_candidates, resolve_ai_config
+from backend.services.ai_extract import (
+    analyze_attachment_for_updates,
+    detect_insurance_candidates,
+    resolve_ai_config,
+)
 from backend.services.attachments import (
     attachments_dir,
     delete_attachment_file,
     save_attachment,
+)
+from backend.services.history import (
+    INSURANCE_HISTORY_FIELDS,
+    HistoryEntryResponse,
+    get_history,
+    record_changes,
 )
 
 router = APIRouter(tags=["insurances"])
@@ -109,6 +119,11 @@ class AttachmentResponse(BaseModel):
     uploaded_at: str
 
 
+class AttachmentUploadResult(BaseModel):
+    attachment: AttachmentResponse
+    suggested_updates: dict[str, Any] = {}
+
+
 class InsuranceResponse(BaseModel):
     id: str
     bucket_id: str
@@ -171,7 +186,7 @@ async def _get_insurance_or_404(
         SELECT i.id, i.bucket_id, i.name, i.insurer, i.policy_number,
                i.recurring_interval, i.recurring_date, i.end_date,
                i.amount, i.currency, i.notes,
-               c.name AS category_name,
+               i.category_id, c.name AS category_name,
                i.created_at, i.updated_at
         FROM insurances i
         LEFT JOIN categories c ON i.category_id = c.id
@@ -354,21 +369,28 @@ async def update_insurance(
     await _check_bucket_access(bucket_id, user, db)
     existing = await _get_insurance_or_404(bucket_id, insurance_id, db)
 
-    if body.category_name is not None:
-        category_id = await _get_or_create_category(body.category_name, db)
+    # Fields the client actually sent (present in the JSON body, even if the
+    # value is null) — vs. fields simply omitted. A cleared date/category/text
+    # field is sent as an explicit null; distinguishing the two is required to
+    # tell "clear this field" apart from "leave it alone" (both look like
+    # `None` once parsed, since Optional[...] fields default to None either way).
+    fields_set = body.model_fields_set
+
+    if "category_name" in fields_set:
+        category_id = (
+            await _get_or_create_category(body.category_name, db)
+            if body.category_name
+            else None
+        )
     else:
-        async with db.execute(
-            "SELECT category_id FROM insurances WHERE id = ?", (insurance_id,)
-        ) as cur:
-            crow = await cur.fetchone()
-        category_id = crow["category_id"] if crow else None
+        category_id = existing["category_id"]
 
     updates = {
         "name": body.name if body.name is not None else existing["name"],
         "insurer": body.insurer if body.insurer is not None else existing["insurer"],
         "policy_number": (
             body.policy_number
-            if body.policy_number is not None
+            if "policy_number" in fields_set
             else existing.get("policy_number")
         ),
         "recurring_interval": (
@@ -378,14 +400,25 @@ async def update_insurance(
         ),
         "recurring_date": (
             body.recurring_date
-            if body.recurring_date is not None
+            if "recurring_date" in fields_set
             else existing["recurring_date"]
         ),
-        "end_date": body.end_date if body.end_date is not None else existing.get("end_date"),
+        "end_date": (
+            body.end_date if "end_date" in fields_set else existing.get("end_date")
+        ),
         "amount": body.amount if body.amount is not None else existing["amount"],
         "currency": body.currency if body.currency is not None else existing["currency"],
         "category_id": category_id,
-        "notes": body.notes if body.notes is not None else existing.get("notes"),
+        "notes": body.notes if "notes" in fields_set else existing.get("notes"),
+    }
+
+    # Human-readable version of the same resolved values, for the change
+    # history log (the SQL updates above use the internal category_id FK).
+    new_display_values = {
+        **updates,
+        "category_name": (
+            body.category_name if "category_name" in fields_set else existing["category_name"]
+        ),
     }
 
     await db.execute(
@@ -399,6 +432,16 @@ async def update_insurance(
         WHERE id = :id
         """,
         {**updates, "id": insurance_id},
+    )
+    await record_changes(
+        db,
+        table="insurance_history",
+        id_column="insurance_id",
+        entity_id=insurance_id,
+        old_values=existing,
+        new_values=new_display_values,
+        fields=INSURANCE_HISTORY_FIELDS,
+        user=user,
     )
     await db.commit()
 
@@ -443,7 +486,7 @@ async def delete_insurance(
 
 @router.post(
     "/api/buckets/{bucket_id}/insurances/{insurance_id}/attachments",
-    response_model=AttachmentResponse,
+    response_model=AttachmentUploadResult,
     status_code=status.HTTP_201_CREATED,
 )
 async def upload_attachment(
@@ -452,9 +495,9 @@ async def upload_attachment(
     file: UploadFile,
     user: CurrentUser = Depends(get_current_user),
     db: aiosqlite.Connection = Depends(get_db),
-) -> AttachmentResponse:
+) -> AttachmentUploadResult:
     await _check_bucket_access(bucket_id, user, db)
-    await _get_insurance_or_404(bucket_id, insurance_id, db)
+    existing = await _get_insurance_or_404(bucket_id, insurance_id, db)
 
     storage_path, filename, size_bytes = await save_attachment(insurance_id, file)
     content_type = file.content_type or "application/octet-stream"
@@ -471,7 +514,30 @@ async def upload_attachment(
         row = await cur.fetchone()
     await db.commit()
 
-    return AttachmentResponse(**dict(row))
+    suggested_updates = await analyze_attachment_for_updates(
+        db,
+        storage_path=storage_path,
+        filename=filename,
+        content_type=content_type,
+        existing_fields={
+            "name": existing["name"],
+            "insurer": existing.get("insurer"),
+            "policy_number": existing.get("policy_number"),
+            "recurring_interval": existing["recurring_interval"],
+            "recurring_date": existing.get("recurring_date"),
+            "end_date": existing.get("end_date"),
+            "amount": existing["amount"],
+            "currency": existing["currency"],
+            "category_name": existing.get("category_name"),
+            "notes": existing.get("notes"),
+        },
+        kind="insurance",
+    )
+
+    return AttachmentUploadResult(
+        attachment=AttachmentResponse(**dict(row)),
+        suggested_updates=suggested_updates,
+    )
 
 
 @router.get(
@@ -521,6 +587,23 @@ async def delete_attachment(
     await db.commit()
 
     delete_attachment_file(attachment["storage_path"])
+
+
+@router.get(
+    "/api/buckets/{bucket_id}/insurances/{insurance_id}/history",
+    response_model=list[HistoryEntryResponse],
+)
+async def get_insurance_history(
+    bucket_id: str,
+    insurance_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+) -> list[dict]:
+    await _check_bucket_access(bucket_id, user, db)
+    await _get_insurance_or_404(bucket_id, insurance_id, db)
+    return await get_history(
+        db, table="insurance_history", id_column="insurance_id", entity_id=insurance_id
+    )
 
 
 # ---------------------------------------------------------------------------

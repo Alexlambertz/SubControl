@@ -181,7 +181,9 @@ export default function AiDocumentImportPanel() {
               <>Drop a document here, or <span className="text-blue-600 font-medium">browse</span></>
             )}
           </p>
-          <p className="text-xs text-gray-400 mt-1">PDF, PNG, or JPG · max 20 MB</p>
+          <p className="text-xs text-gray-400 mt-1">
+            PDF (text or scanned), PNG, or JPG · max 20 MB
+          </p>
           <input
             ref={fileInputRef}
             type="file"

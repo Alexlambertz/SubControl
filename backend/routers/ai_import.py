@@ -6,6 +6,14 @@ Routes
 ------
 POST /api/buckets/{bucket_id}/ai-import/extract   Extract records from a document
 
+PDFs are handled two ways: if they have a text layer, the extracted text is
+sent to the model directly; if not (e.g. a scanned letter saved as PDF, with
+no text layer at all), the first few pages are rendered to images instead
+and sent through the same vision path used for photo/screenshot uploads —
+so image-only PDFs are supported without requiring OCR or a separate upload.
+See backend.services.document_content for that logic (shared with the
+attachment-upload "analyze against existing record" flow).
+
 The uploaded file is read into memory only and never persisted to disk —
 extraction is a read-only preview. Nothing is created until the frontend
 calls the existing subscription/insurance create endpoints (and, for
@@ -15,8 +23,6 @@ user explicitly confirms which proposed records to keep.
 
 from __future__ import annotations
 
-import base64
-import io
 import logging
 from pathlib import Path
 from typing import Any
@@ -30,16 +36,14 @@ from backend.dependencies import CurrentUser, get_current_user
 from backend.routers.subscriptions import _check_bucket_access, _get_bucket_or_404
 from backend.services.ai_extract import extract_records_from_document, resolve_ai_config
 from backend.services.attachments import MAX_ATTACHMENT_BYTES
+from backend.services.document_content import (
+    ALLOWED_ANALYSIS_EXTENSIONS,
+    prepare_document_content,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["ai-import"])
-
-_ALLOWED_EXTRACT_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg"}
-
-# Cap how much extracted PDF text is sent to the model — long documents are
-# truncated rather than blowing up the prompt (and the token bill).
-_MAX_PDF_TEXT_CHARS = 20_000
 
 
 class ExtractedRecord(BaseModel):
@@ -50,18 +54,6 @@ class ExtractedRecord(BaseModel):
 
 class ExtractResponse(BaseModel):
     records: list[ExtractedRecord]
-
-
-def _extract_pdf_text(data: bytes) -> str:
-    from pypdf import PdfReader
-    from pypdf.errors import PdfReadError
-
-    try:
-        reader = PdfReader(io.BytesIO(data))
-        pages = [page.extract_text() or "" for page in reader.pages]
-    except PdfReadError as exc:
-        raise HTTPException(status_code=422, detail=f"Couldn't read this PDF: {exc}") from exc
-    return "\n".join(pages)
 
 
 @router.post(
@@ -84,7 +76,7 @@ async def extract_from_document(
         )
 
     ext = Path(file.filename or "").suffix.lower()
-    if ext not in _ALLOWED_EXTRACT_EXTENSIONS:
+    if ext not in ALLOWED_ANALYSIS_EXTENSIONS:
         raise HTTPException(
             status_code=415,
             detail=f"Unsupported file type '{ext}'. Upload a PDF or an image (PNG/JPG).",
@@ -94,21 +86,12 @@ async def extract_from_document(
     if len(data) > MAX_ATTACHMENT_BYTES:
         raise HTTPException(status_code=413, detail="File too large (max 20 MB)")
 
-    if ext == ".pdf":
-        text = _extract_pdf_text(data)
-        if len(text.strip()) < 50:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "Couldn't read text from this PDF — it may be a scanned "
-                    "image. Try uploading a photo or screenshot instead."
-                ),
-            )
-        content: dict[str, str] = {"kind": "text", "text": text[:_MAX_PDF_TEXT_CHARS]}
-    else:
-        content_type = file.content_type or f"image/{ext.lstrip('.')}"
-        b64 = base64.b64encode(data).decode("ascii")
-        content = {"kind": "image", "data_url": f"data:{content_type};base64,{b64}"}
+    content = await prepare_document_content(file.filename or "", file.content_type, data)
+    if content is None:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type '{ext}'. Upload a PDF or an image (PNG/JPG).",
+        )
 
     records = await extract_records_from_document(content, config)
     return ExtractResponse(records=[ExtractedRecord(**r) for r in records])

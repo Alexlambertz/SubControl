@@ -7,6 +7,7 @@ Covers: CRUD, bucket scoping, all recurring intervals, decimal amount precision,
 
 from __future__ import annotations
 
+import aiosqlite
 import pytest
 from httpx import AsyncClient
 
@@ -229,6 +230,166 @@ class TestUpdateSubscription:
             f"/api/buckets/{bid}/subscriptions/no-id", json={"name": "X"}
         )
         assert resp.status_code == 404
+
+    async def test_explicit_null_clears_end_date(self, client: AsyncClient) -> None:
+        """Regression: an explicit null must clear end_date, not be ignored."""
+        bid = await _create_bucket(client, "ClearEndDate")
+        sub = await _create_sub(client, bid)
+        set_resp = await client.put(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}",
+            json={"end_date": "2026-12-31"},
+        )
+        assert set_resp.json()["end_date"] == "2026-12-31"
+
+        clear_resp = await client.put(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}",
+            json={"end_date": None},
+        )
+        assert clear_resp.status_code == 200
+        assert clear_resp.json()["end_date"] is None
+
+    async def test_omitted_end_date_is_preserved(self, client: AsyncClient) -> None:
+        """An update that doesn't mention end_date at all must leave it alone."""
+        bid = await _create_bucket(client, "PreserveEndDate")
+        sub = await _create_sub(client, bid)
+        await client.put(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}",
+            json={"end_date": "2026-12-31"},
+        )
+        resp = await client.put(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}",
+            json={"amount": 42.0},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["end_date"] == "2026-12-31"
+        assert resp.json()["amount"] == pytest.approx(42.0)
+
+    async def test_explicit_null_clears_category(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "ClearCategory")
+        sub = await _create_sub(client, bid, category="Streaming")
+        assert sub["category_name"] == "Streaming"
+
+        resp = await client.put(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}",
+            json={"category_name": None},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["category_name"] is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: Change history
+# ---------------------------------------------------------------------------
+
+
+class TestSubscriptionHistory:
+    async def test_update_records_history(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "HistoryBucket")
+        sub = await _create_sub(client, bid, amount=9.99)
+        resp = await client.put(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}",
+            json={"amount": 14.99},
+        )
+        assert resp.status_code == 200
+
+        hist_resp = await client.get(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}/history"
+        )
+        assert hist_resp.status_code == 200
+        entries = hist_resp.json()
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry["field"] == "amount"
+        assert entry["old_value"] == "9.99"
+        assert entry["new_value"] == "14.99"
+        assert entry["changed_by_username"] == "dev_admin"
+        assert entry["changed_at"]
+
+    async def test_partial_update_records_only_changed_fields(
+        self, client: AsyncClient
+    ) -> None:
+        bid = await _create_bucket(client, "PartialHistoryBucket")
+        sub = await _create_sub(client, bid, amount=9.99)
+        resp = await client.put(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}",
+            json={"name": "RenamedOnly"},
+        )
+        assert resp.status_code == 200
+
+        hist_resp = await client.get(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}/history"
+        )
+        entries = hist_resp.json()
+        assert len(entries) == 1
+        assert entries[0]["field"] == "name"
+
+    async def test_create_does_not_record_history(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "NoHistoryOnCreate")
+        sub = await _create_sub(client, bid)
+
+        hist_resp = await client.get(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}/history"
+        )
+        assert hist_resp.json() == []
+
+    async def test_unchanged_update_records_nothing(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "NoOpUpdateBucket")
+        sub = await _create_sub(client, bid, amount=9.99)
+        resp = await client.put(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}",
+            json={"amount": 9.99},
+        )
+        assert resp.status_code == 200
+
+        hist_resp = await client.get(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}/history"
+        )
+        assert hist_resp.json() == []
+
+    async def test_image_url_change_excluded_from_history(
+        self, client: AsyncClient
+    ) -> None:
+        """image_url is refreshed by a background logo job, not a user edit."""
+        bid = await _create_bucket(client, "ImageUrlHistoryBucket")
+        sub = await _create_sub(client, bid)
+        resp = await client.put(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}",
+            json={"image_url": "https://example.com/logo.png"},
+        )
+        assert resp.status_code == 200
+
+        hist_resp = await client.get(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}/history"
+        )
+        assert hist_resp.json() == []
+
+    async def test_history_not_found_for_missing_sub(
+        self, client: AsyncClient
+    ) -> None:
+        bid = await _create_bucket(client, "MissingSubHistory")
+        resp = await client.get(f"/api/buckets/{bid}/subscriptions/no-id/history")
+        assert resp.status_code == 404
+
+    async def test_delete_cascades_history(
+        self, client: AsyncClient, db: aiosqlite.Connection
+    ) -> None:
+        bid = await _create_bucket(client, "CascadeHistoryBucket")
+        sub = await _create_sub(client, bid, amount=9.99)
+        await client.put(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}",
+            json={"amount": 14.99},
+        )
+        del_resp = await client.delete(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}"
+        )
+        assert del_resp.status_code == 204
+
+        async with db.execute(
+            "SELECT COUNT(*) AS n FROM subscription_history WHERE subscription_id = ?",
+            (sub["id"],),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row["n"] == 0
 
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,8 @@ except ImportError:  # pragma: no cover
     AsyncOpenAI = None  # type: ignore[assignment,misc]
 
 from backend.services.ai_chat import _get_settings
+from backend.services.attachments import attachments_dir
+from backend.services.document_content import prepare_document_content
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,23 @@ def _parse_json_object(raw: str | None) -> dict[str, Any]:
         logger.warning("AI response was not valid JSON")
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _content_to_message(content: dict[str, Any], instruction: str) -> Any:
+    """
+    Build a chat message ``content`` value (plain string or vision parts
+    list) from an ``ai_extract`` content dict — shared by every function
+    here that takes document text/images as input.
+    """
+    if content["kind"] == "text":
+        return f"{instruction}\n\nDocument text:\n{content['text']}"
+
+    data_urls = content["data_urls"]
+    page_note = f" ({len(data_urls)} pages)" if len(data_urls) > 1 else ""
+    return [
+        {"type": "text", "text": f"{instruction}{page_note}."},
+        *({"type": "image_url", "image_url": {"url": url}} for url in data_urls),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -183,14 +202,15 @@ async def detect_insurance_candidates(
 
 
 async def extract_records_from_document(
-    content: dict[str, str], config: AiConfig
+    content: dict[str, Any], config: AiConfig
 ) -> list[dict[str, Any]]:
     """
     Ask the AI to extract subscription/insurance records from a document.
 
     *content* is either ``{"kind": "text", "text": "..."}`` (extracted PDF
-    text) or ``{"kind": "image", "data_url": "data:image/...;base64,..."}``
-    (a photo/screenshot, sent as a vision message part).
+    text) or ``{"kind": "image", "data_urls": ["data:image/...;base64,...", ...]}``
+    (one or more page images — e.g. a photo/screenshot, or pages rendered
+    from a scanned/image-only PDF — sent as vision message parts).
 
     Returns a list of ``{"type": "subscription"|"insurance", "confidence": ...,
     "fields": {...}}`` dicts. Entries with an unrecognised type or missing
@@ -215,13 +235,7 @@ async def extract_records_from_document(
         "If the document doesn't look like either, return an empty records array."
     )
 
-    if content["kind"] == "text":
-        user_content: Any = f"Document text:\n{content['text']}"
-    else:
-        user_content = [
-            {"type": "text", "text": "Extract billing information from this document image."},
-            {"type": "image_url", "image_url": {"url": content["data_url"]}},
-        ]
+    user_content = _content_to_message(content, "Extract billing information from this document")
 
     client = AsyncOpenAI(base_url=config.api_url, api_key=config.api_key)
     try:
@@ -260,3 +274,131 @@ async def extract_records_from_document(
         confidence = r.get("confidence") if r.get("confidence") in ("high", "medium", "low") else "low"
         results.append({"type": record_type, "confidence": confidence, "fields": fields})
     return results
+
+
+# ---------------------------------------------------------------------------
+# Attachment analysis — compare a document against an existing record
+# ---------------------------------------------------------------------------
+
+_SUBSCRIPTION_UPDATE_FIELDS = {
+    "name", "provider_name", "recurring_interval", "recurring_date",
+    "end_date", "amount", "currency", "category_name",
+}
+_INSURANCE_UPDATE_FIELDS = {
+    "name", "insurer", "policy_number", "recurring_interval", "recurring_date",
+    "end_date", "amount", "currency", "category_name", "notes",
+}
+
+
+async def extract_field_updates(
+    existing_fields: dict[str, Any],
+    kind: str,
+    content: dict[str, Any],
+    config: AiConfig,
+) -> dict[str, Any]:
+    """
+    Compare a newly uploaded document against *existing_fields* (the current
+    stored values for a subscription or insurance) and return only the
+    fields whose document-derived value actually differs.
+
+    *kind* is ``"subscription"`` or ``"insurance"`` — selects which field
+    set/description is used. *content* is the same shape
+    :func:`extract_records_from_document` takes (text or one or more
+    page images).
+
+    The response is never trusted blindly: any key outside the known field
+    set for *kind*, any value that already matches ``existing_fields``, and
+    any invalid ``recurring_interval`` are dropped server-side — regardless
+    of whether the model followed the "omit unchanged fields" instruction.
+    """
+    if AsyncOpenAI is None:
+        return {}
+
+    if kind == "insurance":
+        field_descr, allowed_fields = _INSURANCE_FIELDS, _INSURANCE_UPDATE_FIELDS
+    else:
+        field_descr, allowed_fields = _SUBSCRIPTION_FIELDS, _SUBSCRIPTION_UPDATE_FIELDS
+
+    system_prompt = (
+        f"You review a newly uploaded document against the CURRENT stored data for a "
+        f"{kind} in a personal finance app, and identify which fields should be UPDATED "
+        "based on what the document says.\n\n"
+        f"Fields: {field_descr}\n\n"
+        f"Current data: {json.dumps(existing_fields)}\n\n"
+        "Respond with ONLY a JSON object of this exact shape, no prose:\n"
+        '{"updates": {"<field>": <new value>, ...}}\n'
+        "Include a field ONLY if the document clearly states a value that is DIFFERENT "
+        "from the current data shown above. Omit any field that matches the current "
+        "value, that the document doesn't mention, or that you're not confident about. "
+        "If nothing should change, return an empty updates object."
+    )
+
+    user_content = _content_to_message(
+        content, "Compare this document against the current data and identify any changed fields"
+    )
+
+    client = AsyncOpenAI(base_url=config.api_url, api_key=config.api_key)
+    try:
+        response = await client.chat.completions.create(
+            model=config.model,
+            stream=False,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+        )
+    except Exception:
+        logger.exception("AI field-update comparison call failed")
+        return {}
+
+    content_str = response.choices[0].message.content if response.choices else None
+    parsed = _parse_json_object(content_str)
+    raw_updates = parsed.get("updates")
+    if not isinstance(raw_updates, dict):
+        return {}
+
+    results: dict[str, Any] = {}
+    for field, value in raw_updates.items():
+        if field not in allowed_fields:
+            continue
+        if field == "recurring_interval" and value not in VALID_INTERVALS:
+            continue
+        if value == existing_fields.get(field):
+            continue
+        results[field] = value
+    return results
+
+
+async def analyze_attachment_for_updates(
+    db: aiosqlite.Connection,
+    *,
+    storage_path: str,
+    filename: str,
+    content_type: str,
+    existing_fields: dict[str, Any],
+    kind: str,
+) -> dict[str, Any]:
+    """
+    Best-effort wrapper around :func:`extract_field_updates` for a just-saved
+    attachment: resolves AI config, reads the file back from disk (the
+    caller's ``UploadFile`` stream is already consumed by ``save_attachment``),
+    and prepares it for analysis. Used by both the subscription and insurance
+    attachment-upload routes.
+
+    Never raises and never blocks the upload it's called from — any failure
+    (AI not configured, unsupported file type, AI call error) simply yields
+    an empty dict, so attachment storage keeps working regardless of AI setup.
+    """
+    config = await resolve_ai_config(db)
+    if config is None:
+        return {}
+    try:
+        data = (attachments_dir() / storage_path).read_bytes()
+        content = await prepare_document_content(filename, content_type, data)
+        if content is None:
+            return {}
+        return await extract_field_updates(existing_fields, kind, content, config)
+    except Exception:
+        logger.exception("Attachment analysis failed for %s", storage_path)
+        return {}

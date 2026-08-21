@@ -1,3 +1,5 @@
+import { lazy, Suspense } from 'react'
+import type { ReactNode } from 'react'
 import {
   createBrowserRouter,
   RouterProvider,
@@ -6,16 +8,31 @@ import {
 } from 'react-router-dom'
 import { useAuth } from './auth/AuthContext'
 import Layout from './components/Layout'
-import Dashboard from './pages/Dashboard'
 import BucketList from './pages/Buckets/BucketList'
 import SubscriptionList from './pages/Subscriptions/SubscriptionList'
 import InsuranceList from './pages/Insurances/InsuranceList'
-import UserList from './pages/Users/UserList'
 import Chat from './pages/Chat'
-import Settings from './pages/Settings'
-import ImportHub from './pages/Import/ImportHub'
 import Search from './pages/Search'
 import AuthCallback from './pages/AuthCallback'
+
+// Lazy-loaded: Dashboard pulls in recharts, and Users/Settings/Import are
+// only needed once navigated to — keeping them out of the initial bundle.
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const UserList = lazy(() => import('./pages/Users/UserList'))
+const Settings = lazy(() => import('./pages/Settings'))
+const ImportHub = lazy(() => import('./pages/Import/ImportHub'))
+
+function PageFallback() {
+  return (
+    <div className="flex items-center justify-center py-24">
+      <div className="w-8 h-8 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+    </div>
+  )
+}
+
+function lazyPage(node: ReactNode) {
+  return <Suspense fallback={<PageFallback />}>{node}</Suspense>
+}
 
 // ---------------------------------------------------------------------------
 // RequireAuth — shows a spinner while auth is initialising; once resolved,
@@ -73,7 +90,7 @@ const router = createBrowserRouter([
         path: '/',
         element: <Layout />,
         children: [
-          { index: true, element: <Dashboard /> },
+          { index: true, element: lazyPage(<Dashboard />) },
           { path: 'buckets', element: <BucketList /> },
           {
             path: 'buckets/:bucketId/subscriptions',
@@ -89,13 +106,13 @@ const router = createBrowserRouter([
           },
           { path: 'search', element: <Search /> },
           { path: 'chat', element: <Chat /> },
-          { path: 'import', element: <ImportHub /> },
+          { path: 'import', element: lazyPage(<ImportHub />) },
           // Admin-only routes
           {
             element: <RequireAdmin />,
             children: [
-              { path: 'users', element: <UserList /> },
-              { path: 'settings', element: <Settings /> },
+              { path: 'users', element: lazyPage(<UserList />) },
+              { path: 'settings', element: lazyPage(<Settings />) },
             ],
           },
         ],

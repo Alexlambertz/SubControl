@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 
+import aiosqlite
 import pytest
 from httpx import AsyncClient
 
@@ -186,6 +187,144 @@ class TestGetUpdateDeleteInsurance:
         resp = await client.get(f"/api/buckets/{bid}/insurances/{ins['id']}")
         assert resp.status_code == 404
 
+    async def test_explicit_null_clears_end_date(self, client: AsyncClient) -> None:
+        """Regression: an explicit null must clear end_date, not be ignored."""
+        bid = await _create_bucket(client, "ClearEndDate")
+        ins = await _create_insurance(client, bid)
+        set_resp = await client.put(
+            f"/api/buckets/{bid}/insurances/{ins['id']}",
+            json={"end_date": "2026-12-31"},
+        )
+        assert set_resp.json()["end_date"] == "2026-12-31"
+
+        clear_resp = await client.put(
+            f"/api/buckets/{bid}/insurances/{ins['id']}",
+            json={"end_date": None},
+        )
+        assert clear_resp.status_code == 200
+        assert clear_resp.json()["end_date"] is None
+
+    async def test_omitted_end_date_is_preserved(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "PreserveEndDate")
+        ins = await _create_insurance(client, bid)
+        await client.put(
+            f"/api/buckets/{bid}/insurances/{ins['id']}",
+            json={"end_date": "2026-12-31"},
+        )
+        resp = await client.put(
+            f"/api/buckets/{bid}/insurances/{ins['id']}",
+            json={"amount": 42.0},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["end_date"] == "2026-12-31"
+        assert resp.json()["amount"] == pytest.approx(42.0)
+
+    async def test_explicit_null_clears_category(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "ClearCategory")
+        ins = await _create_insurance(client, bid, category="Insurance")
+        assert ins["category_name"] == "Insurance"
+
+        resp = await client.put(
+            f"/api/buckets/{bid}/insurances/{ins['id']}",
+            json={"category_name": None},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["category_name"] is None
+
+    async def test_explicit_null_clears_policy_number_and_notes(
+        self, client: AsyncClient
+    ) -> None:
+        bid = await _create_bucket(client, "ClearTextFields")
+        ins = await _create_insurance(client, bid, policy_number="POL-1")
+        await client.put(
+            f"/api/buckets/{bid}/insurances/{ins['id']}",
+            json={"notes": "some notes"},
+        )
+        resp = await client.put(
+            f"/api/buckets/{bid}/insurances/{ins['id']}",
+            json={"policy_number": None, "notes": None},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["policy_number"] is None
+        assert body["notes"] is None
+
+
+class TestInsuranceHistory:
+    async def test_update_records_history(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "HistoryBucket")
+        ins = await _create_insurance(client, bid, amount=100.0)
+        resp = await client.put(
+            f"/api/buckets/{bid}/insurances/{ins['id']}",
+            json={"amount": 150.0, "insurer": "New Insurer"},
+        )
+        assert resp.status_code == 200
+
+        hist_resp = await client.get(
+            f"/api/buckets/{bid}/insurances/{ins['id']}/history"
+        )
+        assert hist_resp.status_code == 200
+        entries = {e["field"]: e for e in hist_resp.json()}
+        assert set(entries) == {"amount", "insurer"}
+        assert entries["amount"]["old_value"] == "100.0"
+        assert entries["amount"]["new_value"] == "150.0"
+        assert entries["insurer"]["old_value"] == "Allianz"
+        assert entries["insurer"]["new_value"] == "New Insurer"
+        assert entries["amount"]["changed_by_username"] == "dev_admin"
+
+    async def test_partial_update_records_only_changed_fields(
+        self, client: AsyncClient
+    ) -> None:
+        bid = await _create_bucket(client, "PartialHistoryBucket")
+        ins = await _create_insurance(client, bid, amount=100.0)
+        resp = await client.put(
+            f"/api/buckets/{bid}/insurances/{ins['id']}",
+            json={"notes": "renewed early"},
+        )
+        assert resp.status_code == 200
+
+        hist_resp = await client.get(
+            f"/api/buckets/{bid}/insurances/{ins['id']}/history"
+        )
+        entries = hist_resp.json()
+        assert len(entries) == 1
+        assert entries[0]["field"] == "notes"
+
+    async def test_create_does_not_record_history(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "NoHistoryOnCreate")
+        ins = await _create_insurance(client, bid)
+
+        hist_resp = await client.get(
+            f"/api/buckets/{bid}/insurances/{ins['id']}/history"
+        )
+        assert hist_resp.json() == []
+
+    async def test_history_not_found_for_missing_insurance(
+        self, client: AsyncClient
+    ) -> None:
+        bid = await _create_bucket(client, "MissingInsuranceHistory")
+        resp = await client.get(f"/api/buckets/{bid}/insurances/no-id/history")
+        assert resp.status_code == 404
+
+    async def test_delete_cascades_history(
+        self, client: AsyncClient, db: aiosqlite.Connection
+    ) -> None:
+        bid = await _create_bucket(client, "CascadeHistoryBucket")
+        ins = await _create_insurance(client, bid, amount=100.0)
+        await client.put(
+            f"/api/buckets/{bid}/insurances/{ins['id']}",
+            json={"amount": 150.0},
+        )
+        del_resp = await client.delete(f"/api/buckets/{bid}/insurances/{ins['id']}")
+        assert del_resp.status_code == 204
+
+        async with db.execute(
+            "SELECT COUNT(*) AS n FROM insurance_history WHERE insurance_id = ?",
+            (ins["id"],),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row["n"] == 0
+
 
 # ---------------------------------------------------------------------------
 # Tests: Attachments
@@ -202,7 +341,9 @@ class TestAttachments:
             files={"file": ("conditions.pdf", b"%PDF-1.4 fake pdf content", "application/pdf")},
         )
         assert resp.status_code == 201, resp.text
-        attachment = resp.json()
+        body = resp.json()
+        assert body["suggested_updates"] == {}
+        attachment = body["attachment"]
         assert attachment["filename"] == "conditions.pdf"
         assert attachment["size_bytes"] > 0
 
@@ -222,7 +363,7 @@ class TestAttachments:
             f"/api/buckets/{bid}/insurances/{ins['id']}/attachments",
             files={"file": ("terms.pdf", content, "application/pdf")},
         )
-        attachment_id = resp.json()["id"]
+        attachment_id = resp.json()["attachment"]["id"]
 
         resp = await client.get(
             f"/api/buckets/{bid}/insurances/{ins['id']}/attachments/{attachment_id}"
@@ -237,7 +378,7 @@ class TestAttachments:
             f"/api/buckets/{bid}/insurances/{ins['id']}/attachments",
             files={"file": ("terms.pdf", b"content", "application/pdf")},
         )
-        attachment_id = resp.json()["id"]
+        attachment_id = resp.json()["attachment"]["id"]
 
         resp = await client.delete(
             f"/api/buckets/{bid}/insurances/{ins['id']}/attachments/{attachment_id}"

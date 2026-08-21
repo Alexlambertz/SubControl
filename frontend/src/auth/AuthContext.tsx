@@ -25,7 +25,7 @@
  * it is never exposed to the browser.
  */
 
-import { createContext, useContext, useEffect, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { UserManager, WebStorageStateStore } from 'oidc-client-ts'
 import { setAccessToken } from '../api/client'
@@ -175,31 +175,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => { cancelled = true }
   }, [])
 
-  const login = async () => {
+  const login = useCallback(async () => {
     if (_userManager) await _userManager.signinRedirect()
-  }
+  }, [])
 
-  const logout = async () => {
+  const logout = useCallback(async () => {
     setUser(null)
     clearSessionTokens()
     if (_userManager) {
       await _userManager.signoutRedirect()
     }
-  }
+  }, [])
 
-  return (
-    <AuthContext.Provider
-      value={{
-        user,
-        isLoading,
-        isAuthenticated: user !== null,
-        login,
-        logout,
-      }}
-    >
-      {children}
-    </AuthContext.Provider>
+  const value = useMemo(
+    () => ({
+      user,
+      isLoading,
+      isAuthenticated: user !== null,
+      login,
+      logout,
+    }),
+    [user, isLoading, login, logout],
   )
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }
 
 export function useAuth(): AuthContextValue {

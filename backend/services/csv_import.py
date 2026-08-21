@@ -54,33 +54,35 @@ VALID_INTERVALS = {"daily", "weekly", "monthly", "quarterly", "half-year", "year
 ProviderFallback = Literal["error", "use_name", "skip"]
 
 
-async def _get_or_create_provider(name: str, db: aiosqlite.Connection) -> int:
-    async with db.execute("SELECT id FROM providers WHERE name = ?", (name,)) as cur:
-        row = await cur.fetchone()
-    if row:
-        return row["id"]
-    async with db.execute(
-        "INSERT INTO providers (name) VALUES (?) RETURNING id", (name,)
-    ) as cur:
-        row = await cur.fetchone()
-    return row["id"]
+async def _load_id_map(table: str, db: aiosqlite.Connection) -> dict[str, int]:
+    """Load every {name: id} pair from *table* (providers or categories) in one query."""
+    async with db.execute(f"SELECT id, name FROM {table}") as cur:
+        rows = await cur.fetchall()
+    return {row["name"]: row["id"] for row in rows}
 
 
-async def _get_or_create_category(
-    name: str, db: aiosqlite.Connection
-) -> Optional[int]:
-    if not name or not name.strip():
-        return None
-    name = name.strip()
-    async with db.execute("SELECT id FROM categories WHERE name = ?", (name,)) as cur:
-        row = await cur.fetchone()
-    if row:
-        return row["id"]
+async def _bulk_create_missing(
+    table: str, names: set[str], cache: dict[str, int], db: aiosqlite.Connection
+) -> None:
+    """
+    Ensure every name in *names* has a row in *table* and an entry in *cache*.
+
+    Batches the inserts with ``executemany`` instead of one round trip per
+    name, then backfills *cache* with a single ``SELECT ... WHERE name IN``.
+    """
+    missing = [n for n in names if n not in cache]
+    if not missing:
+        return
+    await db.executemany(
+        f"INSERT OR IGNORE INTO {table} (name) VALUES (?)",
+        [(n,) for n in missing],
+    )
+    placeholders = ",".join("?" for _ in missing)
     async with db.execute(
-        "INSERT INTO categories (name) VALUES (?) RETURNING id", (name,)
+        f"SELECT id, name FROM {table} WHERE name IN ({placeholders})", missing
     ) as cur:
-        row = await cur.fetchone()
-    return row["id"]
+        rows = await cur.fetchall()
+    cache.update({row["name"]: row["id"] for row in rows})
 
 
 async def import_subscriptions_from_csv(
@@ -125,8 +127,10 @@ async def import_subscriptions_from_csv(
     if reader.fieldnames is None:
         return {"imported": 0, "failed": []}
 
-    imported = 0
     failed = []
+    valid_rows: list[dict] = []
+    needed_providers: set[str] = set()
+    needed_categories: set[str] = set()
 
     for row_index, raw_row in enumerate(reader):
         row = {k.strip().lower(): (v.strip() if v else "") for k, v in raw_row.items()}
@@ -180,34 +184,55 @@ async def import_subscriptions_from_csv(
             recurring_date = row.get("recurring_date") or None
             category_name = row.get("category") or None
 
-            # --- Upsert provider / category ---
-            provider_id = await _get_or_create_provider(provider_name, db)
-            category_id = await _get_or_create_category(category_name or "", db)
+            needed_providers.add(provider_name)
+            if category_name:
+                needed_categories.add(category_name)
 
-            # --- Insert subscription ---
-            await db.execute(
-                """
-                INSERT INTO subscriptions
-                    (bucket_id, name, provider_id, recurring_interval,
-                     recurring_date, amount, currency, category_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    bucket_id,
-                    name,
-                    provider_id,
-                    interval,
-                    recurring_date,
-                    amount,
-                    currency,
-                    category_id,
-                ),
+            valid_rows.append(
+                {
+                    "name": name,
+                    "provider_name": provider_name,
+                    "recurring_interval": interval,
+                    "recurring_date": recurring_date,
+                    "amount": amount,
+                    "currency": currency,
+                    "category_name": category_name,
+                }
             )
-            imported += 1
 
         except Exception as exc:
             logger.debug("CSV row %d failed: %s", row_index, exc)
             failed.append({"row": row_index, "error": str(exc)})
 
+    # --- Resolve provider/category ids in bulk (a handful of queries total,
+    #     regardless of row count) instead of up to 2 round trips per row ---
+    provider_cache = await _load_id_map("providers", db)
+    category_cache = await _load_id_map("categories", db)
+    await _bulk_create_missing("providers", needed_providers, provider_cache, db)
+    await _bulk_create_missing("categories", needed_categories, category_cache, db)
+
+    if valid_rows:
+        await db.executemany(
+            """
+            INSERT INTO subscriptions
+                (bucket_id, name, provider_id, recurring_interval,
+                 recurring_date, amount, currency, category_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    bucket_id,
+                    r["name"],
+                    provider_cache[r["provider_name"]],
+                    r["recurring_interval"],
+                    r["recurring_date"],
+                    r["amount"],
+                    r["currency"],
+                    category_cache.get(r["category_name"]) if r["category_name"] else None,
+                )
+                for r in valid_rows
+            ],
+        )
+
     await db.commit()
-    return {"imported": imported, "failed": failed}
+    return {"imported": len(valid_rows), "failed": failed}

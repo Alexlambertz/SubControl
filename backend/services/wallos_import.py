@@ -40,7 +40,7 @@ every2weeks → weekly         (approximate — not ideal, but avoids rejection)
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import aiosqlite
 import httpx
@@ -81,33 +81,35 @@ def _normalise_interval(raw: str | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-async def _get_or_create_provider(name: str, db: aiosqlite.Connection) -> int:
-    async with db.execute("SELECT id FROM providers WHERE name = ?", (name,)) as cur:
-        row = await cur.fetchone()
-    if row:
-        return row["id"]
-    async with db.execute(
-        "INSERT INTO providers (name) VALUES (?) RETURNING id", (name,)
-    ) as cur:
-        row = await cur.fetchone()
-    return row["id"]
+async def _load_id_map(table: str, db: aiosqlite.Connection) -> dict[str, int]:
+    """Load every {name: id} pair from *table* (providers or categories) in one query."""
+    async with db.execute(f"SELECT id, name FROM {table}") as cur:
+        rows = await cur.fetchall()
+    return {row["name"]: row["id"] for row in rows}
 
 
-async def _get_or_create_category(
-    name: str | None, db: aiosqlite.Connection
-) -> Optional[int]:
-    if not name or not name.strip():
-        return None
-    name = name.strip()
-    async with db.execute("SELECT id FROM categories WHERE name = ?", (name,)) as cur:
-        row = await cur.fetchone()
-    if row:
-        return row["id"]
+async def _bulk_create_missing(
+    table: str, names: set[str], cache: dict[str, int], db: aiosqlite.Connection
+) -> None:
+    """
+    Ensure every name in *names* has a row in *table* and an entry in *cache*.
+
+    Batches the inserts with ``executemany`` instead of one round trip per
+    name, then backfills *cache* with a single ``SELECT ... WHERE name IN``.
+    """
+    missing = [n for n in names if n not in cache]
+    if not missing:
+        return
+    await db.executemany(
+        f"INSERT OR IGNORE INTO {table} (name) VALUES (?)",
+        [(n,) for n in missing],
+    )
+    placeholders = ",".join("?" for _ in missing)
     async with db.execute(
-        "INSERT INTO categories (name) VALUES (?) RETURNING id", (name,)
+        f"SELECT id, name FROM {table} WHERE name IN ({placeholders})", missing
     ) as cur:
-        row = await cur.fetchone()
-    return row["id"]
+        rows = await cur.fetchall()
+    cache.update({row["name"]: row["id"] for row in rows})
 
 
 # ---------------------------------------------------------------------------
@@ -290,9 +292,11 @@ async def import_from_wallos(
 
     logger.info("Wallos returned %d subscription(s)", len(raw_subs))
 
-    imported = 0
     skipped = 0
     failed: list[dict] = []
+    valid_subs: list[dict] = []
+    needed_providers: set[str] = set()
+    needed_categories: set[str] = set()
 
     for raw in raw_subs:
         try:
@@ -307,32 +311,46 @@ async def import_from_wallos(
             skipped += 1
             continue
 
-        try:
-            provider_id = await _get_or_create_provider(sub["provider_name"], db)
-            category_id = await _get_or_create_category(sub["category_name"], db)
+        needed_providers.add(sub["provider_name"])
+        if sub["category_name"]:
+            needed_categories.add(sub["category_name"])
+        valid_subs.append(sub)
 
-            await db.execute(
+    # --- Resolve provider/category ids in bulk instead of up to 2 round
+    #     trips per subscription ---
+    try:
+        provider_cache = await _load_id_map("providers", db)
+        category_cache = await _load_id_map("categories", db)
+        await _bulk_create_missing("providers", needed_providers, provider_cache, db)
+        await _bulk_create_missing("categories", needed_categories, category_cache, db)
+
+        if valid_subs:
+            await db.executemany(
                 """
                 INSERT INTO subscriptions
                     (bucket_id, name, provider_id, recurring_interval,
                      recurring_date, amount, currency, category_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    bucket_id,
-                    sub["name"],
-                    provider_id,
-                    sub["recurring_interval"],
-                    sub["recurring_date"],
-                    sub["amount"],
-                    sub["currency"],
-                    category_id,
-                ),
+                [
+                    (
+                        bucket_id,
+                        sub["name"],
+                        provider_cache[sub["provider_name"]],
+                        sub["recurring_interval"],
+                        sub["recurring_date"],
+                        sub["amount"],
+                        sub["currency"],
+                        category_cache.get(sub["category_name"]) if sub["category_name"] else None,
+                    )
+                    for sub in valid_subs
+                ],
             )
-            imported += 1
-        except Exception as exc:
-            logger.exception("DB insert failed for '%s'", sub["name"])
-            failed.append({"name": sub["name"], "error": f"Database error: {exc}"})
+        imported = len(valid_subs)
+    except Exception as exc:
+        logger.exception("Wallos import: bulk DB insert failed")
+        imported = 0
+        failed.extend({"name": sub["name"], "error": f"Database error: {exc}"} for sub in valid_subs)
 
     await db.commit()
     logger.info(

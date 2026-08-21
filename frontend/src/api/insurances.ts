@@ -1,17 +1,17 @@
 import { get, post, put, del, postFormData, getBlob } from './client'
-import type { Insurance, InsuranceAttachment } from '../types'
+import type { Insurance, AttachmentUploadResult, HistoryEntry } from '../types'
 
 export interface InsurancePayload {
   name: string
   insurer: string
-  policy_number?: string
+  policy_number?: string | null
   recurring_interval: string
-  recurring_date?: string
-  end_date?: string
+  recurring_date?: string | null
+  end_date?: string | null
   amount: number
   currency?: string
-  category_name?: string
-  notes?: string
+  category_name?: string | null
+  notes?: string | null
 }
 
 export const insurancesApi = {
@@ -29,7 +29,7 @@ export const insurancesApi = {
   uploadAttachment: (bucketId: string, insuranceId: string, file: File) => {
     const form = new FormData()
     form.append('file', file)
-    return postFormData<InsuranceAttachment>(
+    return postFormData<AttachmentUploadResult>(
       `/buckets/${bucketId}/insurances/${insuranceId}/attachments`,
       form,
     )
@@ -56,4 +56,7 @@ export const insurancesApi = {
 
   deleteAttachment: (bucketId: string, insuranceId: string, attachmentId: string) =>
     del<void>(`/buckets/${bucketId}/insurances/${insuranceId}/attachments/${attachmentId}`),
+
+  getHistory: (bucketId: string, insuranceId: string) =>
+    get<HistoryEntry[]>(`/buckets/${bucketId}/insurances/${insuranceId}/history`),
 }

@@ -41,18 +41,22 @@ export default function Chat() {
     el.style.height = `${el.scrollHeight}px`
   }, [input])
 
-  // Persist history across navigation
+  // Persist history across navigation. Skipped while a response is
+  // streaming (messages update on every chunk) — persisted once when the
+  // stream completes, by which point `messages` already holds the final
+  // content, instead of on every single chunk.
   useEffect(() => {
+    if (loading) return
     try {
       sessionStorage.setItem(storageKey, JSON.stringify(messages))
     } catch {
       // sessionStorage unavailable (e.g. private browsing quota) — ignore
     }
-  }, [messages])
+  }, [messages, loading, storageKey])
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    bottomRef.current?.scrollIntoView({ behavior: loading ? 'auto' : 'smooth' })
+  }, [messages, loading])
 
   const handleFileSelect = (file: File) => {
     if (!file.name.toLowerCase().endsWith('.csv')) {

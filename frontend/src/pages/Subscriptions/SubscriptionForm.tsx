@@ -1,14 +1,18 @@
 /**
- * Modal form for creating and editing subscriptions.
+ * Modal form for creating and editing subscriptions, including an
+ * attachments panel (e.g. a signup confirmation or renewal letter) once
+ * the subscription has been saved.
  */
 
-import { useState } from 'react'
-import { useQuery, useMutation } from '@tanstack/react-query'
-import { X } from 'lucide-react'
+import { useRef, useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { X, Paperclip, Upload, Download, Trash2, FileText } from 'lucide-react'
 import { subscriptionsApi } from '../../api/subscriptions'
 import { get } from '../../api/client'
 import DateField from '../../components/DateField'
-import type { Subscription, RecurringInterval } from '../../types'
+import FieldUpdateReview from '../../components/FieldUpdateReview'
+import ChangeHistory from '../../components/ChangeHistory'
+import type { Attachment, Subscription, RecurringInterval } from '../../types'
 import { INTERVAL_LABELS } from '../../types'
 
 // Lazy-load providers/categories lists — must use authenticated client
@@ -24,6 +28,23 @@ async function fetchCategories(): Promise<{ id: number; name: string }[]> {
 const INPUT_CLS =
   'w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-900 bg-white focus:ring-2 focus:ring-blue-500 outline-none'
 
+const FIELD_LABELS: Record<string, string> = {
+  name: 'Name',
+  provider_name: 'Provider',
+  recurring_interval: 'Billing interval',
+  recurring_date: 'Last payment date',
+  end_date: 'End date',
+  amount: 'Amount',
+  currency: 'Currency',
+  category_name: 'Category',
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
 interface Props {
   bucketId: string
   subscription?: Subscription
@@ -38,6 +59,7 @@ export default function SubscriptionForm({
   onSaved,
 }: Props) {
   const isEdit = !!subscription
+  const qc = useQueryClient()
 
   const [name, setName] = useState(subscription?.name ?? '')
   const [providerName, setProviderName] = useState(subscription?.provider_name ?? '')
@@ -55,6 +77,19 @@ export default function SubscriptionForm({
   )
   const [error, setError] = useState('')
 
+  // Attachments — only manageable once the subscription exists (edit mode);
+  // a brand-new subscription is saved (and the modal closes) before it has
+  // an id to attach files to.
+  const [attachments, setAttachments] = useState<Attachment[]>(
+    subscription?.attachments ?? [],
+  )
+  const subId = subscription?.id ?? null
+  const [uploading, setUploading] = useState(false)
+  const [dragging, setDragging] = useState(false)
+  const [attachError, setAttachError] = useState('')
+  const [suggestedUpdates, setSuggestedUpdates] = useState<Record<string, string | number | null> | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
   const { data: providers = [] } = useQuery({
     queryKey: ['providers'],
     queryFn: fetchProviders,
@@ -71,11 +106,14 @@ export default function SubscriptionForm({
         name,
         provider_name: providerName,
         recurring_interval: interval,
-        recurring_date: recurringDate || undefined,
-        end_date: endDate || undefined,
+        // Explicit null (not undefined) so a cleared field is actually
+        // cleared on update — omitting the key would be indistinguishable
+        // from "leave this field alone" server-side.
+        recurring_date: recurringDate || null,
+        end_date: endDate || null,
         amount: parseFloat(amount),
         currency,
-        category_name: categoryName || undefined,
+        category_name: categoryName || null,
       }
       return isEdit
         ? subscriptionsApi.update(bucketId, subscription!.id, data)
@@ -84,6 +122,55 @@ export default function SubscriptionForm({
     onSuccess: onSaved,
     onError: (e: Error) => setError(e.message),
   })
+
+  const handleFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0 || !subId) return
+    setAttachError('')
+    setUploading(true)
+    try {
+      for (const file of Array.from(files)) {
+        const result = await subscriptionsApi.uploadAttachment(bucketId, subId, file)
+        setAttachments((prev) => [...prev, result.attachment])
+        // Last upload's suggestions win if multiple files are dropped at once.
+        setSuggestedUpdates(
+          Object.keys(result.suggested_updates).length > 0 ? result.suggested_updates : null,
+        )
+      }
+      qc.invalidateQueries({ queryKey: ['subscriptions', bucketId] })
+    } catch (e) {
+      setAttachError(e instanceof Error ? e.message : 'Upload failed')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const handleDeleteAttachment = async (attachmentId: string) => {
+    if (!subId) return
+    await subscriptionsApi.deleteAttachment(bucketId, subId, attachmentId)
+    setAttachments((prev) => prev.filter((a) => a.id !== attachmentId))
+    qc.invalidateQueries({ queryKey: ['subscriptions', bucketId] })
+  }
+
+  const currentFieldValues: Record<string, unknown> = {
+    name, provider_name: providerName, recurring_interval: interval,
+    recurring_date: recurringDate, end_date: endDate, amount, currency,
+    category_name: categoryName,
+  }
+
+  const handleApplyUpdates = async (selected: Record<string, string | number | null>) => {
+    if (!subId) return
+    const updated = await subscriptionsApi.update(bucketId, subId, selected)
+    if ('name' in selected) setName(updated.name)
+    if ('provider_name' in selected) setProviderName(updated.provider_name ?? '')
+    if ('recurring_interval' in selected) setInterval(updated.recurring_interval)
+    if ('recurring_date' in selected) setRecurringDate(updated.recurring_date ?? '')
+    if ('end_date' in selected) setEndDate(updated.end_date ?? '')
+    if ('amount' in selected) setAmount(String(updated.amount))
+    if ('currency' in selected) setCurrency(updated.currency)
+    if ('category_name' in selected) setCategoryName(updated.category_name ?? '')
+    setSuggestedUpdates(null)
+    qc.invalidateQueries({ queryKey: ['subscriptions', bucketId] })
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -265,6 +352,105 @@ export default function SubscriptionForm({
             </button>
           </div>
         </form>
+
+        {/* ── Attachments ─────────────────────────────────────────────────── */}
+        <div className="mt-6 pt-5 border-t border-gray-100">
+          <div className="flex items-center gap-2 mb-3">
+            <Paperclip size={15} className="text-gray-400" />
+            <h3 className="text-sm font-semibold text-gray-700">
+              Documents
+            </h3>
+          </div>
+
+          {!subId ? (
+            <p className="text-xs text-gray-400">
+              Save the subscription first, then edit it again to attach documents.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {attachments.length > 0 && (
+                <ul className="divide-y divide-gray-100 border border-gray-100 rounded-lg overflow-hidden">
+                  {attachments.map((a) => (
+                    <li key={a.id} className="flex items-center gap-2 px-3 py-2 text-sm">
+                      <FileText size={15} className="text-gray-400 shrink-0" />
+                      <span className="flex-1 min-w-0 truncate text-gray-700">{a.filename}</span>
+                      <span className="text-xs text-gray-400 shrink-0">{formatSize(a.size_bytes)}</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          subscriptionsApi.downloadAttachment(
+                            bucketId, subId, a.id, a.filename,
+                          )
+                        }
+                        className="p-1 text-gray-400 hover:text-blue-600 rounded transition shrink-0"
+                        title="Download"
+                      >
+                        <Download size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteAttachment(a.id)}
+                        className="p-1 text-gray-400 hover:text-red-600 rounded transition shrink-0"
+                        title="Delete"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <div
+                onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+                onDragLeave={() => setDragging(false)}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  setDragging(false)
+                  handleFiles(e.dataTransfer.files)
+                }}
+                onClick={() => fileInputRef.current?.click()}
+                className={`flex flex-col items-center justify-center gap-1.5 border-2 border-dashed rounded-lg py-5 text-center cursor-pointer transition ${
+                  dragging ? 'border-blue-400 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
+                }`}
+              >
+                <Upload size={18} className="text-gray-400" />
+                <p className="text-xs text-gray-500">
+                  {uploading ? 'Uploading…' : 'Drop a file here, or click to browse'}
+                </p>
+                <p className="text-xs text-gray-400">PDF, image, or Word document · max 20 MB</p>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  className="hidden"
+                  accept=".pdf,.png,.jpg,.jpeg,.doc,.docx"
+                  multiple
+                  onChange={(e) => handleFiles(e.target.files)}
+                />
+              </div>
+
+              {attachError && <p className="text-xs text-red-500">{attachError}</p>}
+
+              {suggestedUpdates && (
+                <FieldUpdateReview
+                  updates={suggestedUpdates}
+                  currentValues={currentFieldValues}
+                  fieldLabels={FIELD_LABELS}
+                  onApply={handleApplyUpdates}
+                  onDismiss={() => setSuggestedUpdates(null)}
+                />
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* ── Change history ──────────────────────────────────────────────── */}
+        {isEdit && subId && (
+          <ChangeHistory
+            queryKey={['subscription-history', bucketId, subId]}
+            queryFn={() => subscriptionsApi.getHistory(bucketId, subId)}
+            fieldLabels={FIELD_LABELS}
+          />
+        )}
       </div>
     </div>
   )

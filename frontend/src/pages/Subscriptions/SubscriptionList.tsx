@@ -115,6 +115,13 @@ export default function SubscriptionList() {
       .map(([key, subscriptions]) => ({ key, subscriptions }))
   }, [subs, markedUniqueIds])
 
+  // O(1) membership lookup per row instead of re-scanning duplicateGroups
+  // for every subscription on every render.
+  const duplicateIds = useMemo(
+    () => new Set(duplicateGroups.flatMap((g) => g.subscriptions.map((s) => s.id))),
+    [duplicateGroups],
+  )
+
   // Auto-close the panel when all groups are resolved
   useEffect(() => {
     if (duplicateGroups.length === 0) setShowDuplicates(false)
@@ -250,9 +257,7 @@ export default function SubscriptionList() {
       ) : (
         <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">
           {subs.map((sub) => {
-            const isDuplicateCandidate = duplicateGroups.some((g) =>
-              g.subscriptions.some((s) => s.id === sub.id),
-            )
+            const isDuplicateCandidate = duplicateIds.has(sub.id)
             const isMarkedUnique = markedUniqueIds.has(sub.id)
             const endDateExpired =
               sub.end_date != null &&

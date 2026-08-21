@@ -71,6 +71,7 @@ async def client(test_db_path: str) -> AsyncGenerator[AsyncClient, None]:
     original_url = cfg.settings.database_url
     cfg.settings.database_url = f"sqlite+aiosqlite:///{test_db_path}"
 
+    app = None
     try:
         from backend.main import create_app
 
@@ -79,4 +80,10 @@ async def client(test_db_path: str) -> AsyncGenerator[AsyncClient, None]:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             yield ac
     finally:
+        # ASGITransport doesn't run ASGI lifespan events, so the shared DB
+        # connection get_db() lazily creates is never closed by lifespan
+        # shutdown in tests — close it here instead.
+        if app is not None:
+            from backend.database import close_db
+            await close_db(app)
         cfg.settings.database_url = original_url

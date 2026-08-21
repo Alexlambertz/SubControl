@@ -26,7 +26,7 @@ yearly      ÷ 12
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from dateutil.relativedelta import relativedelta
 
 
@@ -98,6 +98,80 @@ def next_due_date(recurring_date: str, interval: str) -> date:
     return last + delta
 
 
+# Fixed-length intervals: day-based ones have a constant day-count, month-based
+# ones have a constant month-count. This lets "how many steps from anchor to
+# reach/pass target" be computed in O(1) instead of looping one step at a time
+# (the old approach could take thousands of iterations for an old daily/weekly
+# anchor queried many years later).
+_INTERVAL_DAY_LENGTHS = {"daily": 1, "weekly": 7}
+_INTERVAL_MONTH_LENGTHS = {"monthly": 1, "quarterly": 3, "half-year": 6, "yearly": 12}
+
+
+def _step_forward(anchor: date, interval: str, target: date, *, min_steps: int) -> date:
+    """
+    Smallest ``anchor + n*interval`` that is ``>= target``, with ``n >= min_steps``.
+
+    Mirrors the pre-rewrite loop pattern: ``min_steps=1`` replicates
+    "start from anchor+delta, then keep adding delta while < target"
+    (used by ``due_date_in_month``); ``min_steps=0`` replicates
+    "start from anchor itself, then keep adding delta while < target"
+    (used by ``any_occurrence_in_month``).
+    """
+    if interval in _INTERVAL_DAY_LENGTHS:
+        step_days = _INTERVAL_DAY_LENGTHS[interval]
+        diff_days = (target - anchor).days
+        n = max(min_steps, -(-diff_days // step_days))  # ceiling division
+        return anchor + timedelta(days=n * step_days)
+
+    step_months = _INTERVAL_MONTH_LENGTHS.get(interval, 1)
+    if anchor.day >= 29:
+        # Stepping through a short month (e.g. February) clamps the day of
+        # month down (30th -> 28th), and — because relativedelta re-derives
+        # from whichever date is *current*, not the original anchor — that
+        # clamp sticks for every later step too. Direct "anchor + n months"
+        # arithmetic can't reproduce that path-dependent clamping, so fall
+        # back to the legacy step-by-step loop for this narrow case (at most
+        # ~12 iterations to hit the first short month, then it degenerates
+        # into the simple no-clamp case). Day-based intervals and the
+        # anchor.day <= 28 case above never clamp, so they stay O(1).
+        delta = _INTERVAL_DELTAS[interval]
+        due = anchor if min_steps == 0 else anchor + delta
+        while due < target:
+            due += delta
+        return due
+
+    month_diff = (target.year - anchor.year) * 12 + (target.month - anchor.month)
+    n = max(min_steps, -(-month_diff // step_months))  # ceiling division
+    return anchor + relativedelta(months=n * step_months)
+
+
+def _step_backward(anchor: date, interval: str, target: date) -> date:
+    """
+    Largest ``anchor - n*interval`` (``n >= 0``) that is ``<= anchor`` and
+    brings the date back to ``<= target`` — mirrors "keep subtracting delta
+    while > target", starting from ``anchor`` itself (n can be 0).
+    """
+    if interval in _INTERVAL_DAY_LENGTHS:
+        step_days = _INTERVAL_DAY_LENGTHS[interval]
+        diff_days = (anchor - target).days
+        n = max(0, -(-diff_days // step_days))
+        return anchor - timedelta(days=n * step_days)
+
+    step_months = _INTERVAL_MONTH_LENGTHS.get(interval, 1)
+    if anchor.day >= 29:
+        # See _step_forward — same path-dependent clamping issue applies
+        # when stepping backward through a short month.
+        delta = _INTERVAL_DELTAS[interval]
+        due = anchor
+        while due > target:
+            due -= delta
+        return due
+
+    month_diff = (anchor.year - target.year) * 12 + (anchor.month - target.month)
+    n = max(0, -(-month_diff // step_months))
+    return anchor - relativedelta(months=n * step_months)
+
+
 def due_date_in_month(
     recurring_date: str,
     interval: str,
@@ -108,9 +182,9 @@ def due_date_in_month(
     """
     Return the due date that falls within *year*-*month*, or ``None``.
 
-    ``recurring_date`` is the **last payment date**.  The function advances
-    forward in steps of *interval* until reaching the target month (hit) or
-    overshooting it (miss).
+    ``recurring_date`` is the **last payment date**.  The nearest occurrence
+    strictly after it (or the anchor itself, if already within the target
+    month) is checked against the target month.
 
     If *end_date* is set and the computed due date would fall after it, ``None``
     is returned (the subscription has ended).  A payment due on *end_date* itself
@@ -136,7 +210,6 @@ def due_date_in_month(
     target_end = (target_start + relativedelta(months=1)) - relativedelta(days=1)
 
     last = date.fromisoformat(recurring_date)
-    delta = _INTERVAL_DELTAS.get(interval, relativedelta(months=1))
 
     # If the anchor (last payment) itself falls in the target month, that IS
     # the billing date for this month — no need to step forward.
@@ -145,10 +218,7 @@ def due_date_in_month(
             return None
         return last
 
-    due = last + delta
-    # Advance until we reach or pass the start of the target month
-    while due < target_start:
-        due += delta
+    due = _step_forward(last, interval, target_start, min_steps=1)
 
     if due > target_end:
         return None
@@ -190,17 +260,13 @@ def any_occurrence_in_month(
     target_end = (target_start + relativedelta(months=1)) - relativedelta(days=1)
 
     anchor = date.fromisoformat(recurring_date)
-    delta = _INTERVAL_DELTAS.get(interval, relativedelta(months=1))
 
-    due = anchor
-    if due < target_start:
-        # Step forward until we reach or pass the target window
-        while due < target_start:
-            due = due + delta
-    elif due > target_end:
-        # Step backward until we're inside or before the target window
-        while due > target_end:
-            due = due - delta
+    if anchor < target_start:
+        due = _step_forward(anchor, interval, target_start, min_steps=0)
+    elif anchor > target_end:
+        due = _step_backward(anchor, interval, target_end)
+    else:
+        due = anchor
 
     if not (target_start <= due <= target_end):
         return None
