@@ -3,9 +3,10 @@ name: CI
 on:
   push:
     branches: [main, develop]
-    tags: ['v*']
   pull_request:
     branches: [main]
+  release:
+    types: [published]
 
 
 jobs:
@@ -179,12 +180,10 @@ jobs:
     name: Publish Docker image (ghcr.io)
     runs-on: ubuntu-latest
     needs: [backend-tests, frontend-tests, docker-build]
-    if: >
-      github.event_name == 'push' &&
-      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    if: github.event_name == 'release'
 
     permissions:
-      contents: write
+      contents: read
       packages: write
 
     steps:
@@ -203,7 +202,7 @@ jobs:
         with:
           images: ghcr.io/alexlambertz/subcontrol
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=,format=short
@@ -220,15 +219,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v3
-        with:
-          generate_release_notes: true
-          body: |
-            ## Docker image
-
-            ```
-            docker pull ghcr.io/alexlambertz/subcontrol:${{ github.ref_name }}
-            ```
