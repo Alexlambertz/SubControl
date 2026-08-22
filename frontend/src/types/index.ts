@@ -136,6 +136,17 @@ export interface ChatMessage {
   content: string
 }
 
+export interface ChatConversationSummary {
+  id: string
+  title: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ChatConversationDetail extends ChatConversationSummary {
+  messages: (ChatMessage & { created_at: string })[]
+}
+
 export interface ImportResult {
   imported: number
   failed: Array<{ row: number; error: string }>

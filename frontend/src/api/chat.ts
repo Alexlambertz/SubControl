@@ -4,8 +4,9 @@
  * The backend streams newline-delimited text chunks via Server-Sent Events.
  */
 
-import { authHeaders } from './client'
+import { authHeaders, get, del } from './client'
 import { silentRefresh, clearSessionTokens } from '../auth/tokenRefresh'
+import type { ChatConversationSummary, ChatConversationDetail } from '../types'
 
 const BASE = '/api'
 
@@ -20,21 +21,26 @@ export interface ChatMessagePayload {
   bucket_id?: string
   /** Raw text content of a CSV file attached by the user. */
   csv_content?: string
+  /** Omit to start a new conversation; the new id arrives via onConversationId. */
+  conversation_id?: string
 }
 
 /**
  * Send a chat message and stream the response.
  *
- * @param payload  - The user message and optional bucket context.
- * @param onChunk  - Called with each streamed text chunk.
- * @param onDone   - Called when the stream is complete.
- * @param signal   - AbortSignal to cancel the request.
+ * @param payload            - The user message and optional bucket context.
+ * @param onChunk            - Called with each streamed text chunk.
+ * @param onDone             - Called when the stream is complete.
+ * @param signal             - AbortSignal to cancel the request.
+ * @param onConversationId   - Called once with the conversation id as soon as
+ *                             response headers arrive (new or existing).
  */
 export async function sendChatMessage(
   payload: ChatMessagePayload,
   onChunk: (text: string) => void,
   onDone: () => void,
   signal?: AbortSignal,
+  onConversationId?: (id: string) => void,
 ): Promise<void> {
   let res = await fetch(`${BASE}/chat/message`, {
     method: 'POST',
@@ -61,6 +67,9 @@ export async function sendChatMessage(
   if (!res.ok) {
     throw new Error(`Chat API error: ${res.status}`)
   }
+
+  const conversationId = res.headers.get('x-conversation-id')
+  if (conversationId) onConversationId?.(conversationId)
 
   const reader = res.body?.getReader()
   if (!reader) {
@@ -102,4 +111,10 @@ export async function sendChatMessage(
   }
 
   onDone()
+}
+
+export const chatConversationsApi = {
+  list: () => get<ChatConversationSummary[]>('/chat/conversations'),
+  get: (id: string) => get<ChatConversationDetail>(`/chat/conversations/${id}`),
+  delete: (id: string) => del<void>(`/chat/conversations/${id}`),
 }

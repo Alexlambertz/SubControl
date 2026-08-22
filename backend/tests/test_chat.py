@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiosqlite
 import pytest
 from httpx import AsyncClient
 
@@ -347,3 +348,147 @@ class TestChatEndpoint:
         created = next(i for i in insurances if i["name"] == "Liability insurance")
         assert created["insurer"] == "HUK24"
         assert created["owner_name"] == "Alex"
+
+
+class TestChatConversations:
+    """Tests for conversation persistence and the conversation CRUD endpoints."""
+
+    async def _configure_ai(self, client: AsyncClient) -> None:
+        await client.put(
+            "/api/settings/ai_api_url",
+            json={"value": "https://api.openai.com/v1"},
+        )
+
+    def _mock_instance(self, reply: str = "Hi there!"):
+        async def fake_create(**kwargs):
+            async def _gen():
+                yield _MockChunk(reply, finish_reason="stop")
+            return _gen()
+
+        instance = MagicMock()
+        instance.chat.completions.create = AsyncMock(side_effect=fake_create)
+        return instance
+
+    async def test_message_without_conversation_id_creates_one(
+        self, client: AsyncClient
+    ) -> None:
+        await self._configure_ai(client)
+        with patch(
+            "backend.services.ai_chat.AsyncOpenAI",
+            return_value=self._mock_instance(),
+        ):
+            res = await client.post(
+                "/api/chat/message",
+                json={"message": "How much do I spend per month?"},
+            )
+        assert res.status_code == 200
+        conv_id = res.headers.get("x-conversation-id")
+        assert conv_id
+
+        list_res = await client.get("/api/chat/conversations")
+        assert list_res.status_code == 200
+        convs = list_res.json()
+        assert any(c["id"] == conv_id for c in convs)
+        found = next(c for c in convs if c["id"] == conv_id)
+        assert found["title"] == "How much do I spend per month?"
+
+    async def test_conversation_detail_includes_both_messages(
+        self, client: AsyncClient
+    ) -> None:
+        await self._configure_ai(client)
+        with patch(
+            "backend.services.ai_chat.AsyncOpenAI",
+            return_value=self._mock_instance("Hello!"),
+        ):
+            res = await client.post(
+                "/api/chat/message",
+                json={"message": "Hi"},
+            )
+        conv_id = res.headers["x-conversation-id"]
+
+        detail_res = await client.get(f"/api/chat/conversations/{conv_id}")
+        assert detail_res.status_code == 200
+        body = detail_res.json()
+        roles = [m["role"] for m in body["messages"]]
+        contents = [m["content"] for m in body["messages"]]
+        assert roles == ["user", "assistant"]
+        assert contents == ["Hi", "Hello!"]
+
+    async def test_second_message_reuses_conversation_id(
+        self, client: AsyncClient
+    ) -> None:
+        await self._configure_ai(client)
+        with patch(
+            "backend.services.ai_chat.AsyncOpenAI",
+            return_value=self._mock_instance("First reply"),
+        ):
+            res1 = await client.post(
+                "/api/chat/message",
+                json={"message": "First message"},
+            )
+        conv_id = res1.headers["x-conversation-id"]
+
+        with patch(
+            "backend.services.ai_chat.AsyncOpenAI",
+            return_value=self._mock_instance("Second reply"),
+        ):
+            res2 = await client.post(
+                "/api/chat/message",
+                json={"message": "Second message", "conversation_id": conv_id},
+            )
+        assert res2.headers["x-conversation-id"] == conv_id
+
+        detail_res = await client.get(f"/api/chat/conversations/{conv_id}")
+        contents = [m["content"] for m in detail_res.json()["messages"]]
+        assert contents == ["First message", "First reply", "Second message", "Second reply"]
+
+        # Only one conversation was created, not two
+        list_res = await client.get("/api/chat/conversations")
+        matching = [c for c in list_res.json() if c["id"] == conv_id]
+        assert len(matching) == 1
+
+    async def test_delete_conversation_removes_it(self, client: AsyncClient) -> None:
+        await self._configure_ai(client)
+        with patch(
+            "backend.services.ai_chat.AsyncOpenAI",
+            return_value=self._mock_instance(),
+        ):
+            res = await client.post(
+                "/api/chat/message",
+                json={"message": "Delete me later"},
+            )
+        conv_id = res.headers["x-conversation-id"]
+
+        del_res = await client.delete(f"/api/chat/conversations/{conv_id}")
+        assert del_res.status_code == 204
+
+        get_res = await client.get(f"/api/chat/conversations/{conv_id}")
+        assert get_res.status_code == 404
+
+    async def test_missing_conversation_returns_404(self, client: AsyncClient) -> None:
+        res = await client.get("/api/chat/conversations/does-not-exist")
+        assert res.status_code == 404
+
+    async def test_conversation_scoped_to_owning_user(
+        self, client: AsyncClient, db: aiosqlite.Connection
+    ) -> None:
+        """A conversation belonging to a different user is invisible to the dev user."""
+        await db.execute(
+            "INSERT INTO users (id, username) VALUES (?, ?)",
+            ("some-other-user-id", "someone-else"),
+        )
+        await db.execute(
+            "INSERT INTO chat_conversations (id, user_id, title) VALUES (?, ?, ?)",
+            ("other-conv-id", "some-other-user-id", "Someone else's chat"),
+        )
+        await db.commit()
+
+        list_res = await client.get("/api/chat/conversations")
+        ids = [c["id"] for c in list_res.json()]
+        assert "other-conv-id" not in ids
+
+        get_res = await client.get("/api/chat/conversations/other-conv-id")
+        assert get_res.status_code == 404
+
+        del_res = await client.delete("/api/chat/conversations/other-conv-id")
+        assert del_res.status_code == 404

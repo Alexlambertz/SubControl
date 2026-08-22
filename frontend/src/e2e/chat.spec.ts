@@ -34,7 +34,11 @@ test.describe('AI Chat', () => {
     await textarea.fill('How much am I spending?')
     await page.getByRole('button', { name: /send/i }).click()
 
-    await expect(page.getByText('How much am I spending?')).toBeVisible()
+    // Scoped to the thread: the sidebar's recent-conversations list can show
+    // the same text as its (auto-generated) conversation title.
+    await expect(
+      page.getByTestId('chat-thread').getByText('How much am I spending?')
+    ).toBeVisible()
   })
 
   test('Enter key sends the message', async ({ page }) => {
@@ -42,7 +46,9 @@ test.describe('AI Chat', () => {
     await textarea.fill('Test via Enter')
     await textarea.press('Enter')
 
-    await expect(page.getByText('Test via Enter')).toBeVisible()
+    await expect(
+      page.getByTestId('chat-thread').getByText('Test via Enter')
+    ).toBeVisible()
   })
 
   test('shows an AI response (or not-configured message) after sending', async ({ page }) => {
