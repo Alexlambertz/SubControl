@@ -129,13 +129,38 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------
     static_dir = Path(__file__).parent / "static"
     if static_dir.exists():
+        # Everything except /assets (index.html, manifest.json, icons, and
+        # the SPA fallback) must never be cached — the app can be installed
+        # as a PWA (standalone home-screen app), and mobile browser engines
+        # (iOS Safari in particular) are notoriously sticky about caching
+        # the root document, which leaves users stuck on a stale shell that
+        # references hashed bundle filenames from a since-replaced deploy.
+        _NO_CACHE_HEADERS = {
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
+
+        class _ImmutableAssets(StaticFiles):
+            """
+            Serves /assets with a long-lived, immutable cache. Safe *only*
+            because Vite fingerprints these filenames with a content hash —
+            a new deploy produces new filenames, so a stale cached asset
+            can never be served under a URL the current index.html expects.
+            """
+
+            def file_response(self, *args, **kwargs) -> Response:  # type: ignore[override]
+                response = super().file_response(*args, **kwargs)
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+                return response
+
         # Mount /assets separately so Starlette serves them efficiently
         # with correct Content-Type headers and caching support.
         assets_dir = static_dir / "assets"
         if assets_dir.exists():
             app.mount(
                 "/assets",
-                StaticFiles(directory=str(assets_dir)),
+                _ImmutableAssets(directory=str(assets_dir)),
                 name="assets",
             )
 
@@ -144,8 +169,10 @@ def create_app() -> FastAPI:
             """Serve static files or fall back to the SPA index."""
             candidate = static_dir / full_path
             if candidate.is_file():
-                return FileResponse(str(candidate))
-            return FileResponse(str(static_dir / "index.html"))
+                return FileResponse(str(candidate), headers=_NO_CACHE_HEADERS)
+            return FileResponse(
+                str(static_dir / "index.html"), headers=_NO_CACHE_HEADERS
+            )
 
     return app
 

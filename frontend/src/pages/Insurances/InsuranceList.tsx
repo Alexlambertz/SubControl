@@ -4,7 +4,7 @@
  * detection, which doesn't apply here).
  */
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2, Pencil, Shield, Paperclip, ListChecks, X, User } from 'lucide-react'
@@ -15,6 +15,7 @@ import CurrencyDisplay from '../../components/CurrencyDisplay'
 import ConfirmDialog from '../../components/ConfirmDialog'
 import BucketTabs from '../../components/BucketTabs'
 import BulkEditModal, { type BulkEditField } from '../../components/BulkEditModal'
+import ListFilterBar from '../../components/ListFilterBar'
 import InsuranceForm from './InsuranceForm'
 import type { Insurance } from '../../types'
 import { INTERVAL_LABELS } from '../../types'
@@ -64,6 +65,38 @@ export default function InsuranceList() {
     queryFn: () => insurancesApi.list(bucketId!),
     enabled: !!bucketId,
   })
+
+  // ── Filters ───────────────────────────────────────────────────────────────
+  const [search, setSearch] = useState('')
+  const [categoryFilter, setCategoryFilter] = useState('')
+  const [ownerFilter, setOwnerFilter] = useState('')
+  const [intervalFilter, setIntervalFilter] = useState('')
+
+  const categoryOptions = useMemo(
+    () => [...new Set(insurances.map((i) => i.category_name).filter((v): v is string => !!v))].sort(),
+    [insurances],
+  )
+  const ownerOptions = useMemo(
+    () => [...new Set(insurances.map((i) => i.owner_name).filter((v): v is string => !!v))].sort(),
+    [insurances],
+  )
+  const intervalOptions = useMemo(
+    () => [...new Set(insurances.map((i) => i.recurring_interval))].sort(),
+    [insurances],
+  )
+
+  const filteredInsurances = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return insurances.filter((i) => {
+      if (q && !i.name.toLowerCase().includes(q) && !i.insurer.toLowerCase().includes(q)) {
+        return false
+      }
+      if (categoryFilter && i.category_name !== categoryFilter) return false
+      if (ownerFilter && i.owner_name !== ownerFilter) return false
+      if (intervalFilter && i.recurring_interval !== intervalFilter) return false
+      return true
+    })
+  }, [insurances, search, categoryFilter, ownerFilter, intervalFilter])
 
   const deleteMut = useMutation({
     mutationFn: (id: string) => insurancesApi.delete(bucketId!, id),
@@ -139,6 +172,18 @@ export default function InsuranceList() {
         </div>
       </div>
 
+      {/* ── Filters ───────────────────────────────────────────────────────── */}
+      <ListFilterBar
+        search={search}
+        onSearchChange={setSearch}
+        searchPlaceholder="Search name or insurer…"
+        selects={[
+          { key: 'category', label: 'Category', value: categoryFilter, options: categoryOptions, onChange: setCategoryFilter },
+          { key: 'owner', label: 'Owner', value: ownerFilter, options: ownerOptions, onChange: setOwnerFilter },
+          { key: 'interval', label: 'Interval', value: intervalFilter, options: intervalOptions, onChange: setIntervalFilter },
+        ]}
+      />
+
       {/* ── Bulk-select bar ──────────────────────────────────────────────── */}
       {selectMode && (
         <div className="flex items-center justify-between gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-2.5">
@@ -172,9 +217,13 @@ export default function InsuranceList() {
         <div className="bg-white rounded-2xl border border-gray-200 py-12 text-center">
           <p className="text-gray-400 text-sm">No insurances in this bucket yet.</p>
         </div>
+      ) : filteredInsurances.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-gray-200 py-12 text-center">
+          <p className="text-gray-400 text-sm">No insurances match your filters.</p>
+        </div>
       ) : (
         <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">
-          {insurances.map((ins) => {
+          {filteredInsurances.map((ins) => {
             const endDateExpired =
               ins.end_date != null && ins.end_date <= new Date().toISOString().slice(0, 10)
 

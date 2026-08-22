@@ -503,6 +503,93 @@ class TestBulkUpdateSubscriptions:
 
 
 # ---------------------------------------------------------------------------
+# Tests: Ignore-duplicate flag
+# ---------------------------------------------------------------------------
+
+
+class TestIgnoreDuplicate:
+    async def test_defaults_to_false(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "IgnoreDupDefaultBucket")
+        sub = await _create_sub(client, bid)
+        assert sub["ignore_duplicate"] is False
+
+    async def test_set_true_persists(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "IgnoreDupSetBucket")
+        sub = await _create_sub(client, bid)
+
+        resp = await client.patch(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}/ignore-duplicate",
+            json={"ignore_duplicate": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ignore_duplicate"] is True
+
+        get_resp = await client.get(f"/api/buckets/{bid}/subscriptions/{sub['id']}")
+        assert get_resp.json()["ignore_duplicate"] is True
+
+    async def test_reflected_in_list(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "IgnoreDupListBucket")
+        sub = await _create_sub(client, bid)
+        await client.patch(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}/ignore-duplicate",
+            json={"ignore_duplicate": True},
+        )
+
+        list_resp = await client.get(f"/api/buckets/{bid}/subscriptions")
+        by_id = {s["id"]: s for s in list_resp.json()}
+        assert by_id[sub["id"]]["ignore_duplicate"] is True
+
+    async def test_can_be_unset(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "IgnoreDupUnsetBucket")
+        sub = await _create_sub(client, bid)
+        await client.patch(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}/ignore-duplicate",
+            json={"ignore_duplicate": True},
+        )
+
+        resp = await client.patch(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}/ignore-duplicate",
+            json={"ignore_duplicate": False},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ignore_duplicate"] is False
+
+    async def test_missing_subscription_returns_404(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "IgnoreDupMissingBucket")
+        resp = await client.patch(
+            f"/api/buckets/{bid}/subscriptions/no-id/ignore-duplicate",
+            json={"ignore_duplicate": True},
+        )
+        assert resp.status_code == 404
+
+    async def test_cross_bucket_id_returns_404(self, client: AsyncClient) -> None:
+        bid1 = await _create_bucket(client, "IgnoreDupCrossA")
+        bid2 = await _create_bucket(client, "IgnoreDupCrossB")
+        sub = await _create_sub(client, bid2)
+
+        resp = await client.patch(
+            f"/api/buckets/{bid1}/subscriptions/{sub['id']}/ignore-duplicate",
+            json={"ignore_duplicate": True},
+        )
+        assert resp.status_code == 404
+
+    async def test_not_recorded_in_change_history(self, client: AsyncClient) -> None:
+        """Workflow state, not a user-facing data field — shouldn't clutter
+        the audit log the way name/amount/category edits do."""
+        bid = await _create_bucket(client, "IgnoreDupHistoryBucket")
+        sub = await _create_sub(client, bid)
+        await client.patch(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}/ignore-duplicate",
+            json={"ignore_duplicate": True},
+        )
+
+        hist_resp = await client.get(
+            f"/api/buckets/{bid}/subscriptions/{sub['id']}/history"
+        )
+        assert hist_resp.json() == []
+
+
+# ---------------------------------------------------------------------------
 # Tests: Delete
 # ---------------------------------------------------------------------------
 

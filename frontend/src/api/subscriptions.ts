@@ -86,4 +86,9 @@ export const subscriptionsApi = {
 
   bulkUpdate: (bucketId: string, ids: string[], update: Partial<SubscriptionPayload>) =>
     patch<{ updated: number }>(`/buckets/${bucketId}/subscriptions/bulk`, { ids, update }),
+
+  setIgnoreDuplicate: (bucketId: string, subId: string, ignoreDuplicate: boolean) =>
+    patch<Subscription>(`/buckets/${bucketId}/subscriptions/${subId}/ignore-duplicate`, {
+      ignore_duplicate: ignoreDuplicate,
+    }),
 }

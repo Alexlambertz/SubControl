@@ -50,6 +50,7 @@ export interface Subscription {
   image_url: string | null
   category_name: string | null
   owner_name: string | null
+  ignore_duplicate: boolean
   created_at: string
   updated_at: string
   attachments: Attachment[]

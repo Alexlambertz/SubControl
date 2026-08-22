@@ -17,6 +17,7 @@ import ConfirmDialog from '../../components/ConfirmDialog'
 import DuplicatesPanel from '../../components/DuplicatesPanel'
 import BucketTabs from '../../components/BucketTabs'
 import BulkEditModal, { type BulkEditField } from '../../components/BulkEditModal'
+import ListFilterBar from '../../components/ListFilterBar'
 import SubscriptionForm from './SubscriptionForm'
 import CsvImport from './CsvImport'
 import type { Subscription } from '../../types'
@@ -39,9 +40,6 @@ const BULK_FIELDS: BulkEditField[] = [
   { key: 'category_name', label: 'Category', type: 'text' },
   { key: 'owner_name', label: 'Owner', type: 'text' },
 ]
-
-/** localStorage key for IDs that the user has explicitly kept (non-duplicate) */
-const markedKey = (bucketId: string) => `subcontrol_marked_unique_${bucketId}`
 
 interface AutoResolveState {
   losers: Subscription[]
@@ -70,26 +68,11 @@ export default function SubscriptionList() {
   const [autoResolve, setAutoResolve] = useState<AutoResolveState | null>(null)
   const [isResolving, setIsResolving] = useState(false)
 
-  /** IDs the user has marked as intentional (excluded from duplicate grouping) */
-  const [markedUniqueIds, setMarkedUniqueIds] = useState<Set<string>>(() => {
-    if (!bucketId) return new Set()
-    try {
-      const raw = localStorage.getItem(markedKey(bucketId))
-      return raw ? new Set(JSON.parse(raw) as string[]) : new Set()
-    } catch {
-      return new Set()
-    }
-  })
-
-  // Persist marked IDs to localStorage whenever they change
-  useEffect(() => {
-    if (!bucketId) return
-    try {
-      localStorage.setItem(markedKey(bucketId), JSON.stringify([...markedUniqueIds]))
-    } catch {
-      // ignore (private browsing etc.)
-    }
-  }, [markedUniqueIds, bucketId])
+  /** List filters — search matches Name/Provider; selects are exact-match AND. */
+  const [search, setSearch] = useState('')
+  const [categoryFilter, setCategoryFilter] = useState('')
+  const [ownerFilter, setOwnerFilter] = useState('')
+  const [intervalFilter, setIntervalFilter] = useState('')
 
   // ── Data fetching ─────────────────────────────────────────────────────────
   const { data: bucket } = useQuery({
@@ -103,6 +86,35 @@ export default function SubscriptionList() {
     queryFn: () => subscriptionsApi.list(bucketId!),
     enabled: !!bucketId,
   })
+
+  // ── Filters ───────────────────────────────────────────────────────────────
+  // Option lists are derived from what's actually in the bucket, so a filter
+  // never offers a value that would return zero results.
+  const categoryOptions = useMemo(
+    () => [...new Set(subs.map((s) => s.category_name).filter((v): v is string => !!v))].sort(),
+    [subs],
+  )
+  const ownerOptions = useMemo(
+    () => [...new Set(subs.map((s) => s.owner_name).filter((v): v is string => !!v))].sort(),
+    [subs],
+  )
+  const intervalOptions = useMemo(
+    () => [...new Set(subs.map((s) => s.recurring_interval))].sort(),
+    [subs],
+  )
+
+  const filteredSubs = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return subs.filter((s) => {
+      if (q && !s.name.toLowerCase().includes(q) && !s.provider_name?.toLowerCase().includes(q)) {
+        return false
+      }
+      if (categoryFilter && s.category_name !== categoryFilter) return false
+      if (ownerFilter && s.owner_name !== ownerFilter) return false
+      if (intervalFilter && s.recurring_interval !== intervalFilter) return false
+      return true
+    })
+  }, [subs, search, categoryFilter, ownerFilter, intervalFilter])
 
   // When navigated from the search page with a specific subscription ID,
   // open its edit modal once the list has loaded.
@@ -149,7 +161,7 @@ export default function SubscriptionList() {
 
   // ── Duplicate detection ───────────────────────────────────────────────────
   const duplicateGroups = useMemo(() => {
-    const eligible = subs.filter((s) => !markedUniqueIds.has(s.id))
+    const eligible = subs.filter((s) => !s.ignore_duplicate)
     const byName = new Map<string, Subscription[]>()
     for (const sub of eligible) {
       const key = sub.name.toLowerCase().trim()
@@ -160,7 +172,7 @@ export default function SubscriptionList() {
     return [...byName.entries()]
       .filter(([, g]) => g.length > 1)
       .map(([key, subscriptions]) => ({ key, subscriptions }))
-  }, [subs, markedUniqueIds])
+  }, [subs])
 
   // O(1) membership lookup per row instead of re-scanning duplicateGroups
   // for every subscription on every render.
@@ -175,8 +187,29 @@ export default function SubscriptionList() {
   }, [duplicateGroups.length])
 
   // ── Duplicate action handlers ─────────────────────────────────────────────
-  const handleMarkUnique = (id: string) =>
-    setMarkedUniqueIds((prev) => new Set([...prev, id]))
+  /**
+   * Persisted server-side (subscriptions.ignore_duplicate) rather than in
+   * localStorage — survives clearing browser data and is shared across
+   * devices/users of the bucket.
+   */
+  const handleMarkUnique = (id: string) => {
+    if (!bucketId) return
+    subscriptionsApi
+      .setIgnoreDuplicate(bucketId, id, true)
+      .then(() => qc.invalidateQueries({ queryKey: ['subscriptions', bucketId] }))
+  }
+
+  const ignoredCount = subs.filter((s) => s.ignore_duplicate).length
+
+  /** Un-ignore every subscription currently excluded from duplicate detection. */
+  const handleResetMarks = async () => {
+    if (!bucketId) return
+    const ignored = subs.filter((s) => s.ignore_duplicate)
+    await Promise.all(
+      ignored.map((s) => subscriptionsApi.setIgnoreDuplicate(bucketId, s.id, false)),
+    )
+    qc.invalidateQueries({ queryKey: ['subscriptions', bucketId] })
+  }
 
   /** Per-group auto-resolve: hand the loser to the existing single-confirm flow. */
   const handleAutoResolveGroup = (loser: Subscription) => setDeleteSub(loser)
@@ -272,6 +305,18 @@ export default function SubscriptionList() {
         </div>
       </div>
 
+      {/* ── Filters ───────────────────────────────────────────────────────── */}
+      <ListFilterBar
+        search={search}
+        onSearchChange={setSearch}
+        searchPlaceholder="Search name or provider…"
+        selects={[
+          { key: 'category', label: 'Category', value: categoryFilter, options: categoryOptions, onChange: setCategoryFilter },
+          { key: 'owner', label: 'Owner', value: ownerFilter, options: ownerOptions, onChange: setOwnerFilter },
+          { key: 'interval', label: 'Interval', value: intervalFilter, options: intervalOptions, onChange: setIntervalFilter },
+        ]}
+      />
+
       {/* ── Bulk-select bar ──────────────────────────────────────────────── */}
       {selectMode && (
         <div className="flex items-center justify-between gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-2.5">
@@ -311,12 +356,12 @@ export default function SubscriptionList() {
                 <span className="text-xs text-amber-600 animate-pulse">Resolving…</span>
               )}
             </div>
-            {markedUniqueIds.size > 0 && (
+            {ignoredCount > 0 && (
               <button
-                onClick={() => setMarkedUniqueIds(new Set())}
+                onClick={handleResetMarks}
                 className="text-xs text-amber-600 hover:text-amber-800 underline underline-offset-2 transition"
               >
-                Reset marks ({markedUniqueIds.size})
+                Reset marks ({ignoredCount})
               </button>
             )}
           </div>
@@ -338,11 +383,15 @@ export default function SubscriptionList() {
         <div className="bg-white rounded-2xl border border-gray-200 py-12 text-center">
           <p className="text-gray-400 text-sm">No subscriptions in this bucket yet.</p>
         </div>
+      ) : filteredSubs.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-gray-200 py-12 text-center">
+          <p className="text-gray-400 text-sm">No subscriptions match your filters.</p>
+        </div>
       ) : (
         <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">
-          {subs.map((sub) => {
+          {filteredSubs.map((sub) => {
             const isDuplicateCandidate = duplicateIds.has(sub.id)
-            const isMarkedUnique = markedUniqueIds.has(sub.id)
+            const isMarkedUnique = sub.ignore_duplicate
             const endDateExpired =
               sub.end_date != null &&
               sub.end_date <= new Date().toISOString().slice(0, 10)

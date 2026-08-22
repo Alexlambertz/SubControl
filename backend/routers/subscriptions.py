@@ -135,6 +135,7 @@ class SubscriptionResponse(BaseModel):
     image_url: Optional[str] = None
     category_name: Optional[str] = None
     owner_name: Optional[str] = None
+    ignore_duplicate: bool = False
     created_at: str
     updated_at: str
     attachments: list[AttachmentResponse] = []
@@ -176,6 +177,7 @@ async def _get_sub_or_404(
                s.amount, s.currency, s.image_url,
                s.category_id, c.name AS category_name,
                s.owner_id, o.name AS owner_name,
+               s.ignore_duplicate,
                s.created_at, s.updated_at
         FROM subscriptions s
         LEFT JOIN providers p ON s.provider_id = p.id
@@ -318,6 +320,7 @@ async def list_subscriptions(
                s.amount, s.currency, s.image_url,
                c.name AS category_name,
                o.name AS owner_name,
+               s.ignore_duplicate,
                s.created_at, s.updated_at
         FROM subscriptions s
         LEFT JOIN providers p ON s.provider_id = p.id
@@ -607,6 +610,43 @@ async def bulk_update_subscriptions(
         await _apply_subscription_update(db, bucket_id, sub_id, body.update, user)
     await db.commit()
     return BulkUpdateResult(updated=len(body.ids))
+
+
+class IgnoreDuplicateRequest(BaseModel):
+    ignore_duplicate: bool
+
+
+@router.patch(
+    "/api/buckets/{bucket_id}/subscriptions/{sub_id}/ignore-duplicate",
+    response_model=SubscriptionResponse,
+)
+async def set_ignore_duplicate(
+    bucket_id: str,
+    sub_id: str,
+    body: IgnoreDuplicateRequest,
+    user: CurrentUser = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+) -> SubscriptionResponse:
+    """
+    Mark (or unmark) a subscription as an intentional non-duplicate — the
+    server-persisted replacement for the old browser-localStorage "marked
+    unique" hack, so the decision survives clearing browser data and is
+    shared across devices/users of the bucket. Not part of the regular
+    update flow (SubscriptionUpdate) since it's workflow state, not a data
+    field the user edits — deliberately not recorded in change history.
+    """
+    await _check_bucket_access(bucket_id, user, db)
+    await _get_sub_or_404(bucket_id, sub_id, db)
+
+    await db.execute(
+        "UPDATE subscriptions SET ignore_duplicate = ? WHERE id = ?",
+        (int(body.ignore_duplicate), sub_id),
+    )
+    await db.commit()
+
+    refreshed = await _get_sub_or_404(bucket_id, sub_id, db)
+    attachments = await _get_attachments(sub_id, db)
+    return SubscriptionResponse(**refreshed, attachments=attachments)
 
 
 @router.delete(
