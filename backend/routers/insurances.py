@@ -12,6 +12,7 @@ DELETE /api/buckets/{bucket_id}/insurances/{insurance_id}                     De
 POST   /api/buckets/{bucket_id}/insurances/{insurance_id}/attachments         Upload attachment
 GET    /api/buckets/{bucket_id}/insurances/{insurance_id}/attachments/{id}    Download attachment
 DELETE /api/buckets/{bucket_id}/insurances/{insurance_id}/attachments/{id}    Delete attachment
+GET    /api/buckets/{bucket_id}/insurances/export                             Export as CSV
 
 Category records are created on-the-fly when a new name is supplied, reusing
 the same helper as the subscriptions router so insurances and subscriptions
@@ -20,11 +21,14 @@ share one category list.
 
 from __future__ import annotations
 
+import csv
+import io
+import logging
 from typing import Any, Optional
 
 import aiosqlite
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, field_validator
 
 from backend.database import get_db
@@ -53,7 +57,15 @@ from backend.services.history import (
     record_changes,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["insurances"])
+
+# Columns written to the exported CSV
+_EXPORT_COLUMNS = [
+    "name", "insurer", "policy_number", "recurring_interval", "recurring_date",
+    "end_date", "amount", "currency", "category", "notes",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +365,65 @@ async def create_insurance(
         category_name=body.category_name,
         owner_name=body.owner_name,
         attachments=[],
+    )
+
+
+@router.get("/api/buckets/{bucket_id}/insurances/export")
+async def export_insurances(
+    bucket_id: str,
+    user: CurrentUser = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+) -> StreamingResponse:
+    """
+    Export all insurances in *bucket_id* as a CSV download.
+
+    Registered before GET /{insurance_id} so the literal "export" path
+    segment is matched first instead of being treated as an insurance_id
+    (same pitfall as import_csv.router needing to precede subscriptions.router).
+    """
+    await _get_bucket_or_404(bucket_id, db)
+    await _check_bucket_access(bucket_id, user, db)
+
+    async with db.execute("SELECT name FROM buckets WHERE id = ?", (bucket_id,)) as cur:
+        bucket_row = await cur.fetchone()
+    bucket_name = bucket_row["name"]
+
+    async with db.execute(
+        """
+        SELECT i.name,
+               i.insurer,
+               i.policy_number,
+               i.recurring_interval,
+               i.recurring_date,
+               i.end_date,
+               i.amount,
+               i.currency,
+               c.name AS category,
+               i.notes
+        FROM insurances i
+        LEFT JOIN categories c ON i.category_id = c.id
+        WHERE i.bucket_id = ?
+        ORDER BY i.name
+        """,
+        (bucket_id,),
+    ) as cur:
+        rows = await cur.fetchall()
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=_EXPORT_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({k: (row[k] or "") for k in _EXPORT_COLUMNS})
+
+    csv_bytes = output.getvalue().encode("utf-8")
+    filename = f"{bucket_name.replace(' ', '_')}_insurances.csv"
+
+    logger.info("CSV export for bucket %s: %d insurance rows", bucket_id, len(rows))
+
+    return StreamingResponse(
+        iter([csv_bytes]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

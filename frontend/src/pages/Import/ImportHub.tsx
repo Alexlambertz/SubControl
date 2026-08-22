@@ -11,6 +11,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { FileText, Globe, Upload, Download, CheckCircle, AlertCircle, Shield, Sparkles } from 'lucide-react'
 import { bucketsApi } from '../../api/buckets'
 import { subscriptionsApi } from '../../api/subscriptions'
+import { insurancesApi } from '../../api/insurances'
 import WallosImport from './WallosImport'
 import FindInsurancesPanel from './FindInsurancesPanel'
 import AiDocumentImportPanel from './AiDocumentImportPanel'
@@ -21,10 +22,10 @@ import type { ImportResult } from '../../types'
 // ---------------------------------------------------------------------------
 
 const TABS = [
+  { id: 'ai-document',      label: 'AI Document Import', icon: Sparkles },
   { id: 'csv',              label: 'CSV Import',        icon: FileText },
   { id: 'wallos',           label: 'WallOS',            icon: Globe },
   { id: 'find-insurances',  label: 'Find Insurances',   icon: Shield },
-  { id: 'ai-document',      label: 'AI Document Import', icon: Sparkles },
   { id: 'export',           label: 'Export',            icon: Download },
 ] as const
 
@@ -199,11 +200,20 @@ function ExportPanel() {
   const [downloading, setDownloading] = useState<string | null>(null)
   const [error, setError] = useState('')
 
-  const handleExport = async (bucketId: string, bucketName: string) => {
-    setDownloading(bucketId)
+  const handleExport = async (
+    kind: 'subscriptions' | 'insurances',
+    bucketId: string,
+    bucketName: string,
+  ) => {
+    const key = `${bucketId}:${kind}`
+    setDownloading(key)
     setError('')
     try {
-      await subscriptionsApi.exportCsv(bucketId, bucketName)
+      if (kind === 'subscriptions') {
+        await subscriptionsApi.exportCsv(bucketId, bucketName)
+      } else {
+        await insurancesApi.exportCsv(bucketId, bucketName)
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Export failed')
     } finally {
@@ -214,8 +224,9 @@ function ExportPanel() {
   return (
     <div className="max-w-xl space-y-6">
       <p className="text-sm text-gray-500">
-        Download all subscriptions from a bucket as a CSV file. The format
-        matches the CSV import so files can be re-imported directly.
+        Download all subscriptions or insurances from a bucket as a CSV file.
+        The subscriptions format matches the CSV import so files can be
+        re-imported directly.
       </p>
 
       <div className="bg-white rounded-2xl border border-gray-200 divide-y divide-gray-100">
@@ -227,14 +238,30 @@ function ExportPanel() {
           buckets.map((bucket) => (
             <div key={bucket.id} className="flex items-center justify-between px-5 py-4">
               <span className="text-sm font-medium text-gray-800">{bucket.name}</span>
-              <button
-                onClick={() => handleExport(bucket.id, bucket.name)}
-                disabled={downloading === bucket.id}
-                className="flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300 disabled:opacity-50 transition"
-              >
-                <Download size={14} className={downloading === bucket.id ? 'animate-pulse' : ''} />
-                {downloading === bucket.id ? 'Downloading…' : 'Export CSV'}
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleExport('subscriptions', bucket.id, bucket.name)}
+                  disabled={downloading === `${bucket.id}:subscriptions`}
+                  className="flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300 disabled:opacity-50 transition"
+                >
+                  <Download
+                    size={14}
+                    className={downloading === `${bucket.id}:subscriptions` ? 'animate-pulse' : ''}
+                  />
+                  {downloading === `${bucket.id}:subscriptions` ? 'Downloading…' : 'Subscriptions'}
+                </button>
+                <button
+                  onClick={() => handleExport('insurances', bucket.id, bucket.name)}
+                  disabled={downloading === `${bucket.id}:insurances`}
+                  className="flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 hover:border-gray-300 disabled:opacity-50 transition"
+                >
+                  <Download
+                    size={14}
+                    className={downloading === `${bucket.id}:insurances` ? 'animate-pulse' : ''}
+                  />
+                  {downloading === `${bucket.id}:insurances` ? 'Downloading…' : 'Insurances'}
+                </button>
+              </div>
             </div>
           ))
         )}
@@ -250,7 +277,7 @@ function ExportPanel() {
 // ---------------------------------------------------------------------------
 
 export default function ImportHub() {
-  const [activeTab, setActiveTab] = useState<TabId>('csv')
+  const [activeTab, setActiveTab] = useState<TabId>('ai-document')
 
   return (
     <div className="space-y-6">

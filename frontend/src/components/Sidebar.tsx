@@ -7,6 +7,7 @@
  */
 
 import { NavLink } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import {
   LayoutDashboard,
   FolderOpen,
@@ -18,6 +19,7 @@ import {
 } from 'lucide-react'
 import clsx from 'clsx'
 import { useAuth } from '../auth/AuthContext'
+import { bucketsApi } from '../api/buckets'
 import { version } from '../../package.json'
 
 interface Props {
@@ -38,6 +40,12 @@ export default function Sidebar({ isOpen, onClose }: Props) {
   const { user } = useAuth()
   const isAdmin = user?.is_admin ?? false
   const links = allLinks.filter((l) => !l.adminOnly || isAdmin)
+
+  // Shown inline under the "Buckets" link for one-click access to a bucket.
+  const { data: buckets = [] } = useQuery({
+    queryKey: ['buckets'],
+    queryFn: bucketsApi.list,
+  })
 
   return (
     <nav
@@ -85,6 +93,30 @@ export default function Sidebar({ isOpen, onClose }: Props) {
               <Icon size={18} />
               {label}
             </NavLink>
+
+            {/* Quick-access bucket list, shown right under "Buckets" */}
+            {to === '/buckets' && buckets.length > 0 && (
+              <ul className="mt-1 ml-4 pl-3 space-y-0.5 border-l border-gray-100">
+                {buckets.map((b) => (
+                  <li key={b.id}>
+                    <NavLink
+                      to={`/buckets/${b.id}/subscriptions`}
+                      onClick={onClose}
+                      className={({ isActive }) =>
+                        clsx(
+                          'block px-2 py-1.5 rounded-md text-xs truncate transition-colors',
+                          isActive
+                            ? 'bg-blue-50 text-blue-700 font-medium'
+                            : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800',
+                        )
+                      }
+                    >
+                      {b.name}
+                    </NavLink>
+                  </li>
+                ))}
+              </ul>
+            )}
           </li>
         ))}
       </ul>

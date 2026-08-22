@@ -27,6 +27,18 @@ export const insurancesApi = {
   delete: (bucketId: string, insuranceId: string) =>
     del<void>(`/buckets/${bucketId}/insurances/${insuranceId}`),
 
+  exportCsv: async (bucketId: string, bucketName: string): Promise<void> => {
+    const blob = await getBlob(`/buckets/${bucketId}/insurances/export`)
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${bucketName.replace(/\s+/g, '_')}_insurances.csv`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  },
+
   uploadAttachment: (bucketId: string, insuranceId: string, file: File) => {
     const form = new FormData()
     form.append('file', file)

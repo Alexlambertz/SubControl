@@ -2,11 +2,11 @@
  * Dashboard page — monthly spend summary + yearly real-cost overview.
  */
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
-  AreaChart, Area, CartesianGrid, ReferenceLine,
+  AreaChart, Area, CartesianGrid, ReferenceLine, useActiveTooltipLabel,
 } from 'recharts'
 import { TrendingUp, Filter, X, CalendarDays, Shield } from 'lucide-react'
 import { dashboardApi } from '../api/dashboard'
@@ -25,8 +25,29 @@ const COLORS = [
 const fmtEur = (v: number) =>
   new Intl.NumberFormat(undefined, { style: 'currency', currency: 'EUR' }).format(v)
 
+/**
+ * Recharts v3 no longer passes chart-coordinate data (activeLabel etc.) to
+ * a chart's `onClick` prop — it's now a plain DOM MouseEvent, since
+ * hit-testing moved into an internal Redux store exposed via hooks instead.
+ * `useActiveTooltipLabel` is the replacement, but it only works inside the
+ * chart's own React context, so this invisible helper — rendered as a
+ * child of <AreaChart> — mirrors the hook's value into a ref the click
+ * handler (attached to the chart itself, outside that context) can read.
+ */
+function ActiveLabelTracker({
+  onChange,
+}: {
+  onChange: (label: string | number | undefined) => void
+}) {
+  const label = useActiveTooltipLabel()
+  useEffect(() => {
+    onChange(label)
+  }, [label, onChange])
+  return null
+}
+
 export default function Dashboard() {
-  const [mode, setMode] = useState<'average' | 'real'>('average')
+  const [mode, setMode] = useState<'average' | 'real'>('real')
   const [month, setMonth] = useState(() => {
     const now = new Date()
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
@@ -67,6 +88,9 @@ export default function Dashboard() {
 
   // Label of the selected month for the reference line ("Jan", "Feb", …)
   const selectedMonthLabel = yearly?.months.find((m) => m.month === month)?.label
+
+  // Kept in sync by <ActiveLabelTracker>; read by the chart's onClick handler.
+  const activeLabelRef = useRef<string | number | undefined>(undefined)
 
   return (
     <div className="space-y-6">
@@ -153,7 +177,14 @@ export default function Dashboard() {
                 <AreaChart
                   data={yearly.months}
                   margin={{ top: 8, right: 16, left: 0, bottom: 0 }}
+                  className="cursor-pointer outline-none"
+                  onClick={() => {
+                    const label = activeLabelRef.current
+                    const targetMonth = yearly.months.find((mo) => mo.label === label)?.month
+                    if (targetMonth) handleMonthChange(targetMonth)
+                  }}
                 >
+                  <ActiveLabelTracker onChange={(l) => { activeLabelRef.current = l }} />
                   <defs>
                     <linearGradient id="baselineGradient" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.35} />
@@ -183,7 +214,17 @@ export default function Dashboard() {
                           fill={isSelected ? '#2563eb' : '#9ca3af'}
                           fontWeight={isSelected ? 600 : 400}
                           style={{ cursor: 'pointer', userSelect: 'none' }}
-                          onClick={() => targetMonth && handleMonthChange(targetMonth)}
+                          onClick={(e) => {
+                            // Stop this precise tick-based selection from also
+                            // bubbling to the chart's own onClick, which uses
+                            // the hover-tracked active label — that label
+                            // isn't reliably in sync with the axis row (it
+                            // tracks the plot area), so letting both fire
+                            // could overwrite this correct value with a stale
+                            // one.
+                            e.stopPropagation()
+                            if (targetMonth) handleMonthChange(targetMonth)
+                          }}
                         >
                           {payload.value}
                         </text>

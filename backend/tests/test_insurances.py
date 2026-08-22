@@ -7,6 +7,7 @@ Covers: CRUD, bucket scoping, category create-on-fly, attachment
 
 from __future__ import annotations
 
+import csv
 import io
 
 import aiosqlite
@@ -525,4 +526,72 @@ class TestAttachments:
         # Re-creating an insurance with the same bucket should not resurrect
         # the deleted one's attachments — sanity check the insurance is gone.
         resp = await client.get(f"/api/buckets/{bid}/insurances/{ins['id']}")
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Tests: CSV export
+# ---------------------------------------------------------------------------
+
+
+class TestExportInsurances:
+    async def test_export_returns_csv(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "ExportBucket1")
+        await _create_insurance(
+            client,
+            bid,
+            name="Household contents",
+            insurer="Allianz",
+            category="Insurance",
+            policy_number="POL-1",
+        )
+        resp = await client.get(f"/api/buckets/{bid}/insurances/export")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/csv")
+        assert "attachment; filename=" in resp.headers["content-disposition"]
+
+        rows = list(csv.DictReader(io.StringIO(resp.text)))
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["name"] == "Household contents"
+        assert row["insurer"] == "Allianz"
+        assert row["policy_number"] == "POL-1"
+        assert row["category"] == "Insurance"
+        assert row["recurring_interval"] == "yearly"
+        assert row["amount"] == "120.0"
+        assert row["currency"] == "EUR"
+
+    async def test_export_not_shadowed_by_insurance_id_route(
+        self, client: AsyncClient
+    ) -> None:
+        # Regression test: /insurances/export must be matched by the export
+        # route, not by GET /{insurance_id} treating "export" as an id.
+        bid = await _create_bucket(client, "ExportBucket2")
+        resp = await client.get(f"/api/buckets/{bid}/insurances/export")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/csv")
+
+    async def test_export_empty_bucket_returns_header_only(
+        self, client: AsyncClient
+    ) -> None:
+        bid = await _create_bucket(client, "ExportBucket3")
+        resp = await client.get(f"/api/buckets/{bid}/insurances/export")
+        assert resp.status_code == 200
+        rows = list(csv.DictReader(io.StringIO(resp.text)))
+        assert rows == []
+
+    async def test_export_scoped_to_bucket(self, client: AsyncClient) -> None:
+        bid_a = await _create_bucket(client, "ExportBucketA")
+        bid_b = await _create_bucket(client, "ExportBucketB")
+        await _create_insurance(client, bid_a, name="Only In A")
+        resp = await client.get(f"/api/buckets/{bid_b}/insurances/export")
+        assert resp.status_code == 200
+        rows = list(csv.DictReader(io.StringIO(resp.text)))
+        names = [r["name"] for r in rows]
+        assert "Only In A" not in names
+
+    async def test_export_missing_bucket_returns_404(
+        self, client: AsyncClient
+    ) -> None:
+        resp = await client.get("/api/buckets/does-not-exist/insurances/export")
         assert resp.status_code == 404
