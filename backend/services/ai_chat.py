@@ -77,6 +77,10 @@ _TOOLS: list[dict[str, Any]] = [
                     "amount": {"type": "number", "description": "Price per interval"},
                     "currency": {"type": "string", "default": "EUR"},
                     "category_name": {"type": "string"},
+                    "owner_name": {
+                        "type": "string",
+                        "description": "Who in the household this belongs to. Omit if unknown.",
+                    },
                 },
                 "required": ["bucket_id", "name", "recurring_interval", "amount"],
             },
@@ -109,8 +113,87 @@ _TOOLS: list[dict[str, Any]] = [
                     "amount": {"type": "number"},
                     "currency": {"type": "string"},
                     "category_name": {"type": "string"},
+                    "owner_name": {"type": "string"},
                 },
                 "required": ["subscription_id", "bucket_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_insurance",
+            "description": (
+                "Create a new insurance policy. "
+                "Call this whenever the user asks to add or set up an insurance policy."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "bucket_id": {
+                        "type": "string",
+                        "description": "Exact bucket_id from the bucket list in the system prompt.",
+                    },
+                    "name": {"type": "string", "description": "Display name of the policy"},
+                    "insurer": {"type": "string", "description": "Insurance company name"},
+                    "policy_number": {"type": "string"},
+                    "recurring_interval": {
+                        "type": "string",
+                        "enum": ["daily", "weekly", "monthly", "quarterly", "half-year", "yearly"],
+                    },
+                    "recurring_date": {
+                        "type": "string",
+                        "description": "Last payment date, ISO format YYYY-MM-DD. Omit if unknown.",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Optional end date YYYY-MM-DD when the policy ends. Omit if ongoing.",
+                    },
+                    "amount": {"type": "number", "description": "Price per interval"},
+                    "currency": {"type": "string", "default": "EUR"},
+                    "category_name": {"type": "string"},
+                    "owner_name": {
+                        "type": "string",
+                        "description": "Who in the household this belongs to. Omit if unknown.",
+                    },
+                    "notes": {"type": "string"},
+                },
+                "required": ["bucket_id", "name", "insurer", "recurring_interval", "amount"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_insurance",
+            "description": (
+                "Update one or more fields of an existing insurance policy. "
+                "Call this when the user wants to change, edit, or modify a policy."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "insurance_id": {"type": "string"},
+                    "bucket_id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "insurer": {"type": "string"},
+                    "policy_number": {"type": "string"},
+                    "recurring_interval": {
+                        "type": "string",
+                        "enum": ["daily", "weekly", "monthly", "quarterly", "half-year", "yearly"],
+                    },
+                    "recurring_date": {"type": "string"},
+                    "end_date": {
+                        "type": "string",
+                        "description": "Optional end date YYYY-MM-DD when the policy ends. Omit if ongoing.",
+                    },
+                    "amount": {"type": "number"},
+                    "currency": {"type": "string"},
+                    "category_name": {"type": "string"},
+                    "owner_name": {"type": "string"},
+                    "notes": {"type": "string"},
+                },
+                "required": ["insurance_id", "bucket_id"],
             },
         },
     },
@@ -185,6 +268,10 @@ _TOOL_CREATE_SUBSCRIPTIONS_BULK: dict[str, Any] = {
                                 "type": "string",
                                 "description": "Category label. Omit if unavailable.",
                             },
+                            "owner_name": {
+                                "type": "string",
+                                "description": "Who this belongs to. Omit if unavailable.",
+                            },
                         },
                         "required": ["name", "recurring_interval", "amount"],
                     },
@@ -237,13 +324,42 @@ async def _get_subscriptions(db: aiosqlite.Connection, user_id: str, is_admin: b
         f"""
         SELECT s.id, s.bucket_id, b.name AS bucket_name,
                s.name, p.name AS provider_name, s.recurring_interval,
-               s.amount, s.currency, c.name AS category_name
+               s.recurring_date, s.end_date, s.amount, s.currency,
+               c.name AS category_name, o.name AS owner_name
         FROM subscriptions s
         JOIN buckets b ON b.id = s.bucket_id
         LEFT JOIN providers p ON p.id = s.provider_id
         LEFT JOIN categories c ON c.id = s.category_id
+        LEFT JOIN owners o ON o.id = s.owner_id
         WHERE 1=1 {access_filter}
         ORDER BY b.name, s.name
+        """,
+        params,
+    )
+    rows = await cursor.fetchall()
+    cols = [d[0] for d in cursor.description]
+    return [dict(zip(cols, row)) for row in rows]
+
+
+async def _get_insurances(db: aiosqlite.Connection, user_id: str, is_admin: bool) -> list[dict[str, Any]]:
+    if is_admin:
+        access_filter = ""
+        params: tuple = ()
+    else:
+        access_filter = "AND i.bucket_id IN (SELECT bucket_id FROM user_buckets WHERE user_id = ?)"
+        params = (user_id,)
+    cursor = await db.execute(
+        f"""
+        SELECT i.id, i.bucket_id, b.name AS bucket_name,
+               i.name, i.insurer, i.policy_number, i.recurring_interval,
+               i.recurring_date, i.end_date, i.amount, i.currency,
+               c.name AS category_name, o.name AS owner_name, i.notes
+        FROM insurances i
+        JOIN buckets b ON b.id = i.bucket_id
+        LEFT JOIN categories c ON c.id = i.category_id
+        LEFT JOIN owners o ON o.id = i.owner_id
+        WHERE 1=1 {access_filter}
+        ORDER BY b.name, i.name
         """,
         params,
     )
@@ -262,6 +378,17 @@ async def _ensure_provider(db: aiosqlite.Connection, name: str) -> int:
 async def _ensure_category(db: aiosqlite.Connection, name: str) -> int:
     await db.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (name,))
     cursor = await db.execute("SELECT id FROM categories WHERE name = ?", (name,))
+    row = await cursor.fetchone()
+    return row[0]
+
+
+async def _ensure_owner(db: aiosqlite.Connection, bucket_id: str, name: str) -> int:
+    await db.execute(
+        "INSERT OR IGNORE INTO owners (bucket_id, name) VALUES (?, ?)", (bucket_id, name)
+    )
+    cursor = await db.execute(
+        "SELECT id FROM owners WHERE bucket_id = ? AND name = ?", (bucket_id, name)
+    )
     row = await cursor.fetchone()
     return row[0]
 
@@ -292,14 +419,18 @@ async def _tool_create_subscription(db_path: str, args: dict[str, Any]) -> dict[
         if args.get("category_name"):
             category_id = await _ensure_category(db, args["category_name"])
 
+        owner_id = None
+        if args.get("owner_name"):
+            owner_id = await _ensure_owner(db, bucket_id, args["owner_name"])
+
         sub_id = secrets.token_hex(16)
         try:
             await db.execute(
                 """
                 INSERT INTO subscriptions
                     (id, bucket_id, name, provider_id, recurring_interval,
-                     recurring_date, end_date, amount, currency, category_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     recurring_date, end_date, amount, currency, category_id, owner_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     sub_id,
@@ -312,6 +443,7 @@ async def _tool_create_subscription(db_path: str, args: dict[str, Any]) -> dict[
                     float(args["amount"]),
                     args.get("currency", "EUR"),
                     category_id,
+                    owner_id,
                 ),
             )
             await db.commit()
@@ -378,6 +510,9 @@ async def _tool_update_subscription(db_path: str, args: dict[str, Any]) -> dict[
         if "category_name" in args:
             category_id = await _ensure_category(db, args["category_name"])
             updates.append(("category_id", category_id))
+        if "owner_name" in args:
+            owner_id = await _ensure_owner(db, bucket_id, args["owner_name"])
+            updates.append(("owner_id", owner_id))
 
         if updates:
             set_clause = ", ".join(f"{col} = ?" for col, _ in updates)
@@ -395,6 +530,122 @@ async def _tool_update_subscription(db_path: str, args: dict[str, Any]) -> dict[
                 return {"error": f"Database error: {exc}"}
 
     return {"id": sub_id, "updated": True}
+
+
+async def _tool_create_insurance(db_path: str, args: dict[str, Any]) -> dict[str, Any]:
+    logger.info("Tool create_insurance: %s", args)
+    bucket_id = args.get("bucket_id", "")
+
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+
+        cursor = await db.execute("SELECT id FROM buckets WHERE id = ?", (bucket_id,))
+        if not await cursor.fetchone():
+            msg = f"Bucket '{bucket_id}' not found."
+            logger.warning("create_insurance failed: %s", msg)
+            return {"error": msg}
+
+        category_id = None
+        if args.get("category_name"):
+            category_id = await _ensure_category(db, args["category_name"])
+
+        owner_id = None
+        if args.get("owner_name"):
+            owner_id = await _ensure_owner(db, bucket_id, args["owner_name"])
+
+        ins_id = secrets.token_hex(16)
+        try:
+            await db.execute(
+                """
+                INSERT INTO insurances
+                    (id, bucket_id, name, insurer, policy_number, recurring_interval,
+                     recurring_date, end_date, amount, currency, category_id, owner_id, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ins_id,
+                    bucket_id,
+                    args["name"],
+                    args["insurer"],
+                    args.get("policy_number"),
+                    args["recurring_interval"],
+                    args.get("recurring_date"),
+                    args.get("end_date"),
+                    float(args["amount"]),
+                    args.get("currency", "EUR"),
+                    category_id,
+                    owner_id,
+                    args.get("notes"),
+                ),
+            )
+            await db.commit()
+            logger.info("create_insurance succeeded: id=%s name=%s", ins_id, args["name"])
+        except Exception as exc:
+            logger.exception("create_insurance DB error")
+            return {"error": f"Database error: {exc}"}
+
+    return {"id": ins_id, "name": args["name"], "created": True}
+
+
+async def _tool_update_insurance(db_path: str, args: dict[str, Any]) -> dict[str, Any]:
+    logger.info("Tool update_insurance: %s", args)
+    ins_id = args.get("insurance_id", "")
+    bucket_id = args.get("bucket_id", "")
+
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
+
+        cursor = await db.execute(
+            "SELECT id FROM insurances WHERE id = ? AND bucket_id = ?",
+            (ins_id, bucket_id),
+        )
+        if not await cursor.fetchone():
+            msg = f"Insurance '{ins_id}' not found in bucket '{bucket_id}'."
+            logger.warning("update_insurance failed: %s", msg)
+            return {"error": msg}
+
+        updates: list[tuple[str, Any]] = []
+        if "name" in args:
+            updates.append(("name", args["name"]))
+        if "insurer" in args:
+            updates.append(("insurer", args["insurer"]))
+        if "policy_number" in args:
+            updates.append(("policy_number", args["policy_number"]))
+        if "recurring_interval" in args:
+            updates.append(("recurring_interval", args["recurring_interval"]))
+        if "recurring_date" in args:
+            updates.append(("recurring_date", args["recurring_date"]))
+        if "end_date" in args:
+            updates.append(("end_date", args["end_date"]))
+        if "amount" in args:
+            updates.append(("amount", float(args["amount"])))
+        if "currency" in args:
+            updates.append(("currency", args["currency"]))
+        if "category_name" in args:
+            category_id = await _ensure_category(db, args["category_name"])
+            updates.append(("category_id", category_id))
+        if "owner_name" in args:
+            owner_id = await _ensure_owner(db, bucket_id, args["owner_name"])
+            updates.append(("owner_id", owner_id))
+        if "notes" in args:
+            updates.append(("notes", args["notes"]))
+
+        if updates:
+            set_clause = ", ".join(f"{col} = ?" for col, _ in updates)
+            values = [v for _, v in updates] + [ins_id]
+            try:
+                await db.execute(
+                    f"UPDATE insurances SET {set_clause},"
+                    f" updated_at = datetime('now') WHERE id = ?",
+                    values,
+                )
+                await db.commit()
+                logger.info("update_insurance succeeded: id=%s", ins_id)
+            except Exception as exc:
+                logger.exception("update_insurance DB error")
+                return {"error": f"Database error: {exc}"}
+
+    return {"id": ins_id, "updated": True}
 
 
 async def _tool_create_subscriptions_bulk(
@@ -442,13 +693,17 @@ async def _tool_create_subscriptions_bulk(
                 if item.get("category_name"):
                     category_id = await _ensure_category(db, item["category_name"])
 
+                owner_id = None
+                if item.get("owner_name"):
+                    owner_id = await _ensure_owner(db, bucket_id, item["owner_name"])
+
                 sub_id = secrets.token_hex(16)
                 await db.execute(
                     """
                     INSERT INTO subscriptions
                         (id, bucket_id, name, provider_id, recurring_interval,
-                         recurring_date, end_date, amount, currency, category_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         recurring_date, end_date, amount, currency, category_id, owner_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         sub_id,
@@ -461,6 +716,7 @@ async def _tool_create_subscriptions_bulk(
                         float(item["amount"]),
                         (item.get("currency") or "EUR").strip().upper(),
                         category_id,
+                        owner_id,
                     ),
                 )
                 logo_name = item.get("provider_name") or name
@@ -515,6 +771,10 @@ async def _dispatch_tool(
             return await _tool_create_subscription(db_path, args)
         if name == "update_subscription":
             return await _tool_update_subscription(db_path, args)
+        if name == "create_insurance":
+            return await _tool_create_insurance(db_path, args)
+        if name == "update_insurance":
+            return await _tool_update_insurance(db_path, args)
         if name == "create_subscriptions_bulk":
             return await _tool_create_subscriptions_bulk(db_path, args)
         logger.warning("Unknown tool requested: %s", name)
@@ -677,6 +937,7 @@ async def stream_chat_response(
             db_settings = await _get_settings(db)
             buckets = await _get_buckets(db, user_id, is_admin)
             subscriptions = await _get_subscriptions(db, user_id, is_admin)
+            insurances = await _get_insurances(db, user_id, is_admin)
     except Exception as exc:
         logger.exception("Failed to read DB context for AI chat")
         yield f'data: {json.dumps({"content": f"⚠️ Could not load data: {exc}"})}\n\n'
@@ -710,12 +971,33 @@ async def stream_chat_response(
             f" (id: {s['id']}, bucket_id: {s['bucket_id']})"
             f" | {s['provider_name'] or 'no provider'}"
             f" | {s['amount']} {s['currency']}/{s['recurring_interval']}"
+            + (f" | last paid: {s['recurring_date']}" if s["recurring_date"] else "")
+            + (f" | ends: {s['end_date']}" if s["end_date"] else "")
             + (f" | [{s['category_name']}]" if s["category_name"] else "")
+            + (f" | owner: {s['owner_name']}" if s["owner_name"] else "")
             for s in subscriptions
         )
         sub_context = f"Current subscriptions:\n{sub_lines}"
     else:
         sub_context = "The user has no subscriptions yet."
+
+    if insurances:
+        ins_lines = "\n".join(
+            f"- [{i['bucket_name']}] {i['name']}"
+            f" (id: {i['id']}, bucket_id: {i['bucket_id']})"
+            f" | insurer: {i['insurer']}"
+            f" | {i['amount']} {i['currency']}/{i['recurring_interval']}"
+            + (f" | policy #: {i['policy_number']}" if i["policy_number"] else "")
+            + (f" | last paid: {i['recurring_date']}" if i["recurring_date"] else "")
+            + (f" | ends: {i['end_date']}" if i["end_date"] else "")
+            + (f" | [{i['category_name']}]" if i["category_name"] else "")
+            + (f" | owner: {i['owner_name']}" if i["owner_name"] else "")
+            + (f" | notes: {i['notes']}" if i["notes"] else "")
+            for i in insurances
+        )
+        insurance_context = f"Current insurance policies:\n{ins_lines}"
+    else:
+        insurance_context = "The user has no insurance policies yet."
 
     csv_rule = (
         "- A CSV file has been attached. To import it:\n"
@@ -732,11 +1014,16 @@ async def stream_chat_response(
         else ""
     )
     system_prompt = "\n".join(filter(None, [
-        "You are SubControl, an AI assistant for managing subscriptions.",
+        "You are SubControl, an AI assistant for managing subscriptions and insurance policies.",
         "",
         "## Rules",
         "- To ADD a subscription: call create_subscription. Use the exact bucket_id from the bucket list.",
         "- To CHANGE a subscription: call update_subscription. Use the exact id and bucket_id from the subscription list.",
+        "- To ADD an insurance policy: call create_insurance. Use the exact bucket_id from the bucket list.",
+        "- To CHANGE an insurance policy: call update_insurance. Use the exact id and bucket_id from the insurance list.",
+        "- Every field on a subscription or insurance (name, provider/insurer, policy_number,",
+        "  recurring_interval, recurring_date, end_date, amount, currency, category_name,",
+        "  owner_name, notes) can be set via these functions — use whichever the user mentions.",
         csv_rule,
         "- NEVER describe or pretend to perform an action — always call the function.",
         "- After a successful function call, confirm briefly what was done.",
@@ -746,6 +1033,8 @@ async def stream_chat_response(
         bucket_context,
         "",
         sub_context,
+        "",
+        insurance_context,
     ]))
 
     # ------------------------------------------------------------------

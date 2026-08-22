@@ -227,3 +227,123 @@ class TestChatEndpoint:
         subs_res = await client.get(f"/api/buckets/{bucket_id}/subscriptions")
         names = [s["name"] for s in subs_res.json()]
         assert "Spotify" in names
+
+    async def test_chat_includes_insurance_context(self, client: AsyncClient):
+        """The system prompt sent to the AI contains the user's insurance policies."""
+        bucket_res = await client.post("/api/buckets", json={"name": "InsBucket"})
+        bucket_id = bucket_res.json()["id"]
+        await client.post(
+            f"/api/buckets/{bucket_id}/insurances",
+            json={
+                "name": "Household contents",
+                "insurer": "Allianz",
+                "recurring_interval": "yearly",
+                "amount": 120.0,
+                "currency": "EUR",
+            },
+        )
+
+        await client.put(
+            "/api/settings/ai_api_url",
+            json={"value": "https://api.openai.com/v1"},
+        )
+
+        captured_messages: list = []
+
+        async def capture_create(**kwargs):
+            captured_messages.extend(kwargs.get("messages", []))
+            async def _gen():
+                yield _MockChunk("done", finish_reason="stop")
+            return _gen()
+
+        mock_instance = MagicMock()
+        mock_instance.chat.completions.create = AsyncMock(side_effect=capture_create)
+
+        with patch("backend.services.ai_chat.AsyncOpenAI", return_value=mock_instance):
+            await client.post(
+                "/api/chat/message",
+                json={"message": "What insurance policies do I have?"},
+            )
+
+        assert captured_messages, "OpenAI client was not called"
+        system_prompt = captured_messages[0]["content"]
+        assert "Household contents" in system_prompt
+        assert "Allianz" in system_prompt
+
+    async def test_chat_tool_call_creates_insurance(self, client: AsyncClient):
+        """A create_insurance tool call from the model is executed."""
+        bucket_res = await client.post("/api/buckets", json={"name": "InsWork"})
+        bucket_id = bucket_res.json()["id"]
+
+        await client.put(
+            "/api/settings/ai_api_url",
+            json={"value": "https://api.openai.com/v1"},
+        )
+
+        tool_args = json.dumps({
+            "bucket_id": bucket_id,
+            "name": "Liability insurance",
+            "insurer": "HUK24",
+            "recurring_interval": "yearly",
+            "amount": 65.0,
+            "currency": "EUR",
+            "owner_name": "Alex",
+        })
+
+        call_count = 0
+
+        async def mock_create(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                async def _first_stream():
+                    tc_delta = _make_tool_call_delta(
+                        index=0,
+                        call_id="call_ins123",
+                        fn_name="create_insurance",
+                        fn_args=tool_args,
+                    )
+                    tc_choice = MagicMock()
+                    tc_choice.delta = MagicMock()
+                    tc_choice.delta.content = None
+                    tc_choice.delta.tool_calls = [tc_delta]
+                    tc_choice.finish_reason = None
+
+                    tc_chunk = MagicMock()
+                    tc_chunk.choices = [tc_choice]
+                    yield tc_chunk
+
+                    final_choice = MagicMock()
+                    final_choice.delta = MagicMock()
+                    final_choice.delta.content = None
+                    final_choice.delta.tool_calls = None
+                    final_choice.finish_reason = "tool_calls"
+
+                    final_chunk = MagicMock()
+                    final_chunk.choices = [final_choice]
+                    yield final_chunk
+
+                return _first_stream()
+            else:
+                async def _second_stream():
+                    yield _MockChunk("Liability insurance added!", finish_reason="stop")
+                return _second_stream()
+
+        mock_instance = MagicMock()
+        mock_instance.chat.completions.create = AsyncMock(side_effect=mock_create)
+
+        with patch("backend.services.ai_chat.AsyncOpenAI", return_value=mock_instance):
+            res = await client.post(
+                "/api/chat/message",
+                json={"message": "Add liability insurance with HUK24 for 65 per year, owned by Alex"},
+            )
+
+        assert res.status_code == 200
+
+        ins_res = await client.get(f"/api/buckets/{bucket_id}/insurances")
+        insurances = ins_res.json()
+        names = [i["name"] for i in insurances]
+        assert "Liability insurance" in names
+        created = next(i for i in insurances if i["name"] == "Liability insurance")
+        assert created["insurer"] == "HUK24"
+        assert created["owner_name"] == "Alex"

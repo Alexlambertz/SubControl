@@ -1,5 +1,5 @@
 /**
- * AI Chat page — streaming chat interface with subscription context.
+ * AI Chat page — streaming chat interface with subscription and insurance context.
  * Conversation history is sent to the backend with every message so the
  * model has full context. The user can clear the history at any time.
  */
@@ -159,8 +159,8 @@ export default function Chat() {
           <div className="text-center py-16 text-gray-400">
             <Bot size={40} className="mx-auto mb-3 opacity-50" />
             <p className="text-sm">
-              Ask me about your subscriptions, request analysis, or add new
-              subscriptions by chat.
+              Ask me about your subscriptions and insurance policies, request
+              analysis, or add new ones by chat.
             </p>
           </div>
         )}
