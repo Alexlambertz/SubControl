@@ -1,6 +1,6 @@
 services:
   app:
-    image: ghcr.io/alexlambertz/subcontrol:2.1.1
+    image: ghcr.io/alexlambertz/subcontrol:2.2.0
     ports:
       - "8000:8000"
     volumes:
