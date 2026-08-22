@@ -32,7 +32,8 @@ test.describe('Bucket management', () => {
 
     await page.getByPlaceholder(/bucket name/i).fill(name)
     await page.getByRole('button', { name: /^create$/i }).click()
-    await expect(page.getByText(name)).toBeVisible()
+    // Scoped to main: the sidebar's bucket quick-nav list also renders the name
+    await expect(page.getByRole('main').getByText(name)).toBeVisible()
 
     // Register for cleanup
     const buckets = await request.get(`${API}/buckets`)
@@ -51,7 +52,7 @@ test.describe('Bucket management', () => {
     createdIds.push(bucket.id)
 
     await page.reload()
-    await expect(page.getByText(oldName)).toBeVisible()
+    await expect(page.getByRole('main').getByText(oldName)).toBeVisible()
 
     // Click the Rename button for this bucket row
     await page.getByTitle(/rename/i).first().click()
@@ -60,8 +61,8 @@ test.describe('Bucket management', () => {
     await editInput.fill(newName)
     await page.getByRole('button', { name: /^save$/i }).click()
 
-    await expect(page.getByText(newName)).toBeVisible()
-    await expect(page.getByText(oldName)).not.toBeVisible()
+    await expect(page.getByRole('main').getByText(newName)).toBeVisible()
+    await expect(page.getByRole('main').getByText(oldName)).not.toBeVisible()
   })
 
   test('deletes a bucket', async ({ page, request }) => {
@@ -72,7 +73,7 @@ test.describe('Bucket management', () => {
     // Don't push to createdIds — the test deletes it
 
     await page.reload()
-    await expect(page.getByText(name)).toBeVisible()
+    await expect(page.getByRole('main').getByText(name)).toBeVisible()
 
     // Click Delete button for that specific row.
     // Use a dual-filter: div that contains the bucket name text AND has a Delete button.
@@ -83,7 +84,7 @@ test.describe('Bucket management', () => {
     await page.getByRole('button', { name: /delete/i }).last().click()
 
     // exact: true avoids matching the dialog message "Delete "name" and all its subscriptions?"
-    await expect(page.getByText(name, { exact: true })).not.toBeVisible()
+    await expect(page.getByRole('main').getByText(name, { exact: true })).not.toBeVisible()
 
     // Verify it no longer exists via API
     const list = await (await request.get(`${API}/buckets`)).json() as Array<{ id: string }>
