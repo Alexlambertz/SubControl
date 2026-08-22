@@ -393,6 +393,116 @@ class TestSubscriptionHistory:
 
 
 # ---------------------------------------------------------------------------
+# Tests: Bulk update
+# ---------------------------------------------------------------------------
+
+
+class TestBulkUpdateSubscriptions:
+    async def test_bulk_update_applies_field_to_all(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "BulkBucket")
+        sub1 = await _create_sub(client, bid, name="Sub1", amount=5.0)
+        sub2 = await _create_sub(client, bid, name="Sub2", amount=7.0)
+
+        resp = await client.patch(
+            f"/api/buckets/{bid}/subscriptions/bulk",
+            json={"ids": [sub1["id"], sub2["id"]], "update": {"amount": 19.99}},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["updated"] == 2
+
+        for sub_id in (sub1["id"], sub2["id"]):
+            get_resp = await client.get(f"/api/buckets/{bid}/subscriptions/{sub_id}")
+            assert get_resp.json()["amount"] == pytest.approx(19.99)
+
+    async def test_bulk_update_only_touches_specified_fields(
+        self, client: AsyncClient
+    ) -> None:
+        bid = await _create_bucket(client, "BulkPartialBucket")
+        sub = await _create_sub(client, bid, name="Untouched", amount=5.0)
+
+        resp = await client.patch(
+            f"/api/buckets/{bid}/subscriptions/bulk",
+            json={"ids": [sub["id"]], "update": {"amount": 42.0}},
+        )
+        assert resp.status_code == 200
+
+        get_resp = await client.get(f"/api/buckets/{bid}/subscriptions/{sub['id']}")
+        body = get_resp.json()
+        assert body["amount"] == pytest.approx(42.0)
+        assert body["name"] == "Untouched"
+
+    async def test_bulk_update_explicit_null_clears_field(
+        self, client: AsyncClient
+    ) -> None:
+        bid = await _create_bucket(client, "BulkClearBucket")
+        sub = await _create_sub(client, bid, category="Streaming")
+        assert sub["category_name"] == "Streaming"
+
+        resp = await client.patch(
+            f"/api/buckets/{bid}/subscriptions/bulk",
+            json={"ids": [sub["id"]], "update": {"category_name": None}},
+        )
+        assert resp.status_code == 200
+
+        get_resp = await client.get(f"/api/buckets/{bid}/subscriptions/{sub['id']}")
+        assert get_resp.json()["category_name"] is None
+
+    async def test_bulk_update_records_history_per_record(
+        self, client: AsyncClient
+    ) -> None:
+        bid = await _create_bucket(client, "BulkHistoryBucket")
+        sub1 = await _create_sub(client, bid, name="A", amount=5.0)
+        sub2 = await _create_sub(client, bid, name="B", amount=5.0)
+
+        await client.patch(
+            f"/api/buckets/{bid}/subscriptions/bulk",
+            json={"ids": [sub1["id"], sub2["id"]], "update": {"amount": 9.0}},
+        )
+
+        for sub_id in (sub1["id"], sub2["id"]):
+            hist_resp = await client.get(
+                f"/api/buckets/{bid}/subscriptions/{sub_id}/history"
+            )
+            entries = hist_resp.json()
+            assert len(entries) == 1
+            assert entries[0]["field"] == "amount"
+            assert entries[0]["old_value"] == "5.0"
+            assert entries[0]["new_value"] == "9.0"
+
+    async def test_bulk_update_owner_name(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "BulkOwnerBucket")
+        sub = await _create_sub(client, bid)
+
+        resp = await client.patch(
+            f"/api/buckets/{bid}/subscriptions/bulk",
+            json={"ids": [sub["id"]], "update": {"owner_name": "Alex"}},
+        )
+        assert resp.status_code == 200
+
+        get_resp = await client.get(f"/api/buckets/{bid}/subscriptions/{sub['id']}")
+        assert get_resp.json()["owner_name"] == "Alex"
+
+    async def test_bulk_update_rejects_id_from_another_bucket(
+        self, client: AsyncClient
+    ) -> None:
+        bid1 = await _create_bucket(client, "BulkCrossA")
+        bid2 = await _create_bucket(client, "BulkCrossB")
+        sub_in_other_bucket = await _create_sub(client, bid2, amount=5.0)
+
+        resp = await client.patch(
+            f"/api/buckets/{bid1}/subscriptions/bulk",
+            json={"ids": [sub_in_other_bucket["id"]], "update": {"amount": 99.0}},
+        )
+        assert resp.status_code == 404
+
+        # Confirm nothing was committed — the record is untouched.
+        get_resp = await client.get(
+            f"/api/buckets/{bid2}/subscriptions/{sub_in_other_bucket['id']}"
+        )
+        assert get_resp.json()["amount"] == pytest.approx(5.0)
+
+
+# ---------------------------------------------------------------------------
 # Tests: Delete
 # ---------------------------------------------------------------------------
 

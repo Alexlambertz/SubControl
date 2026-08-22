@@ -24,18 +24,20 @@ interface Props<T> {
   data: T[]
   rowKey: (row: T) => string
   emptyMessage?: string
+  defaultSort?: { key: string; dir: 'asc' | 'desc' }
 }
 
 type SortDir = 'asc' | 'desc' | null
 
-export default function SortableTable<T extends Record<string, unknown>>({
+export default function SortableTable<T>({
   columns,
   data,
   rowKey,
   emptyMessage = 'No data found.',
+  defaultSort,
 }: Props<T>) {
-  const [sortKey, setSortKey] = useState<string | null>(null)
-  const [sortDir, setSortDir] = useState<SortDir>(null)
+  const [sortKey, setSortKey] = useState<string | null>(defaultSort?.key ?? null)
+  const [sortDir, setSortDir] = useState<SortDir>(defaultSort?.dir ?? null)
 
   const handleSort = (key: string) => {
     if (sortKey !== key) {
@@ -53,8 +55,8 @@ export default function SortableTable<T extends Record<string, unknown>>({
     () =>
       [...data].sort((a, b) => {
         if (!sortKey || !sortDir) return 0
-        const av = a[sortKey] ?? ''
-        const bv = b[sortKey] ?? ''
+        const av = (a as Record<string, unknown>)[sortKey] ?? ''
+        const bv = (b as Record<string, unknown>)[sortKey] ?? ''
         const cmp = String(av).localeCompare(String(bv), undefined, { numeric: true })
         return sortDir === 'asc' ? cmp : -cmp
       }),
@@ -105,7 +107,9 @@ export default function SortableTable<T extends Record<string, unknown>>({
               <tr key={rowKey(row)} className="hover:bg-gray-50 transition-colors">
                 {columns.map((col) => (
                   <td key={String(col.key)} className="px-4 py-3 text-gray-700">
-                    {col.render ? col.render(row) : String(row[String(col.key)] ?? '')}
+                    {col.render
+                      ? col.render(row)
+                      : String((row as Record<string, unknown>)[String(col.key)] ?? '')}
                   </td>
                 ))}
               </tr>

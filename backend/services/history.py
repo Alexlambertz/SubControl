@@ -20,11 +20,11 @@ from backend.dependencies import CurrentUser
 # logo-refresh job, not a user edit, and would spam the log on every refresh.
 SUBSCRIPTION_HISTORY_FIELDS = [
     "name", "provider_name", "recurring_interval", "recurring_date",
-    "end_date", "amount", "currency", "category_name",
+    "end_date", "amount", "currency", "category_name", "owner_name",
 ]
 INSURANCE_HISTORY_FIELDS = [
     "name", "insurer", "policy_number", "recurring_interval", "recurring_date",
-    "end_date", "amount", "currency", "category_name", "notes",
+    "end_date", "amount", "currency", "category_name", "notes", "owner_name",
 ]
 
 

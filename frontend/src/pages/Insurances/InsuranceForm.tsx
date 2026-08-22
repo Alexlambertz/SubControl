@@ -7,6 +7,7 @@ import { useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { X, Paperclip, Upload, Download, Trash2, FileText } from 'lucide-react'
 import { insurancesApi } from '../../api/insurances'
+import { ownersApi } from '../../api/owners'
 import { get } from '../../api/client'
 import DateField from '../../components/DateField'
 import FieldUpdateReview from '../../components/FieldUpdateReview'
@@ -32,6 +33,7 @@ const FIELD_LABELS: Record<string, string> = {
   amount: 'Amount',
   currency: 'Currency',
   category_name: 'Category',
+  owner_name: 'Owner',
   notes: 'Notes',
 }
 
@@ -63,6 +65,7 @@ export default function InsuranceForm({ bucketId, insurance, onClose, onSaved }:
   const [amount, setAmount] = useState(String(insurance?.amount ?? ''))
   const [currency, setCurrency] = useState(insurance?.currency ?? 'EUR')
   const [categoryName, setCategoryName] = useState(insurance?.category_name ?? '')
+  const [ownerName, setOwnerName] = useState(insurance?.owner_name ?? '')
   const [notes, setNotes] = useState(insurance?.notes ?? '')
   const [error, setError] = useState('')
 
@@ -84,6 +87,11 @@ export default function InsuranceForm({ bucketId, insurance, onClose, onSaved }:
     queryFn: fetchCategories,
   })
 
+  const { data: owners = [] } = useQuery({
+    queryKey: ['owners', bucketId],
+    queryFn: () => ownersApi.list(bucketId),
+  })
+
   const saveMut = useMutation({
     mutationFn: () => {
       const data = {
@@ -99,6 +107,7 @@ export default function InsuranceForm({ bucketId, insurance, onClose, onSaved }:
         amount: parseFloat(amount),
         currency,
         category_name: categoryName || null,
+        owner_name: ownerName || null,
         notes: notes || null,
       }
       return isEdit
@@ -140,7 +149,7 @@ export default function InsuranceForm({ bucketId, insurance, onClose, onSaved }:
   const currentFieldValues: Record<string, unknown> = {
     name, insurer, policy_number: policyNumber, recurring_interval: interval,
     recurring_date: recurringDate, end_date: endDate, amount, currency,
-    category_name: categoryName, notes,
+    category_name: categoryName, owner_name: ownerName, notes,
   }
 
   const handleApplyUpdates = async (selected: Record<string, string | number | null>) => {
@@ -155,6 +164,7 @@ export default function InsuranceForm({ bucketId, insurance, onClose, onSaved }:
     if ('amount' in selected) setAmount(String(updated.amount))
     if ('currency' in selected) setCurrency(updated.currency)
     if ('category_name' in selected) setCategoryName(updated.category_name ?? '')
+    if ('owner_name' in selected) setOwnerName(updated.owner_name ?? '')
     if ('notes' in selected) setNotes(updated.notes ?? '')
     setSuggestedUpdates(null)
     qc.invalidateQueries({ queryKey: ['insurances', bucketId] })
@@ -295,6 +305,33 @@ export default function InsuranceForm({ bucketId, insurance, onClose, onSaved }:
             </div>
             <datalist id="insurance-categories-list">
               {categories.map((c) => <option key={c.id} value={c.name} />)}
+            </datalist>
+          </div>
+
+          {/* Owner */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Owner</label>
+            <div className="relative">
+              <input
+                list="insurance-owners-list"
+                value={ownerName}
+                onChange={(e) => setOwnerName(e.target.value)}
+                className={INPUT_CLS}
+                placeholder="e.g. Alex"
+              />
+              {ownerName && (
+                <button
+                  type="button"
+                  onClick={() => setOwnerName('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-gray-400 hover:text-gray-600 transition"
+                  title="Clear owner"
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+            <datalist id="insurance-owners-list">
+              {owners.map((o) => <option key={o.id} value={o.name} />)}
             </datalist>
           </div>
 

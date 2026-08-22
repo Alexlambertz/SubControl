@@ -8,6 +8,7 @@ import { useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { X, Paperclip, Upload, Download, Trash2, FileText } from 'lucide-react'
 import { subscriptionsApi } from '../../api/subscriptions'
+import { ownersApi } from '../../api/owners'
 import { get } from '../../api/client'
 import DateField from '../../components/DateField'
 import FieldUpdateReview from '../../components/FieldUpdateReview'
@@ -37,6 +38,7 @@ const FIELD_LABELS: Record<string, string> = {
   amount: 'Amount',
   currency: 'Currency',
   category_name: 'Category',
+  owner_name: 'Owner',
 }
 
 function formatSize(bytes: number): string {
@@ -75,6 +77,9 @@ export default function SubscriptionForm({
   const [categoryName, setCategoryName] = useState(
     subscription?.category_name ?? ''
   )
+  const [ownerName, setOwnerName] = useState(
+    subscription?.owner_name ?? ''
+  )
   const [error, setError] = useState('')
 
   // Attachments — only manageable once the subscription exists (edit mode);
@@ -100,6 +105,11 @@ export default function SubscriptionForm({
     queryFn: fetchCategories,
   })
 
+  const { data: owners = [] } = useQuery({
+    queryKey: ['owners', bucketId],
+    queryFn: () => ownersApi.list(bucketId),
+  })
+
   const saveMut = useMutation({
     mutationFn: () => {
       const data = {
@@ -114,6 +124,7 @@ export default function SubscriptionForm({
         amount: parseFloat(amount),
         currency,
         category_name: categoryName || null,
+        owner_name: ownerName || null,
       }
       return isEdit
         ? subscriptionsApi.update(bucketId, subscription!.id, data)
@@ -154,7 +165,7 @@ export default function SubscriptionForm({
   const currentFieldValues: Record<string, unknown> = {
     name, provider_name: providerName, recurring_interval: interval,
     recurring_date: recurringDate, end_date: endDate, amount, currency,
-    category_name: categoryName,
+    category_name: categoryName, owner_name: ownerName,
   }
 
   const handleApplyUpdates = async (selected: Record<string, string | number | null>) => {
@@ -168,6 +179,7 @@ export default function SubscriptionForm({
     if ('amount' in selected) setAmount(String(updated.amount))
     if ('currency' in selected) setCurrency(updated.currency)
     if ('category_name' in selected) setCategoryName(updated.category_name ?? '')
+    if ('owner_name' in selected) setOwnerName(updated.owner_name ?? '')
     setSuggestedUpdates(null)
     qc.invalidateQueries({ queryKey: ['subscriptions', bucketId] })
   }
@@ -327,6 +339,37 @@ export default function SubscriptionForm({
             <datalist id="categories-list">
               {categories.map((c) => (
                 <option key={c.id} value={c.name} />
+              ))}
+            </datalist>
+          </div>
+
+          {/* Owner */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Owner
+            </label>
+            <div className="relative">
+              <input
+                list="owners-list"
+                value={ownerName}
+                onChange={(e) => setOwnerName(e.target.value)}
+                className={INPUT_CLS}
+                placeholder="e.g. Alex"
+              />
+              {ownerName && (
+                <button
+                  type="button"
+                  onClick={() => setOwnerName('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-gray-400 hover:text-gray-600 transition"
+                  title="Clear owner"
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+            <datalist id="owners-list">
+              {owners.map((o) => (
+                <option key={o.id} value={o.name} />
               ))}
             </datalist>
           </div>

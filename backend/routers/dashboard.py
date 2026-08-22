@@ -45,6 +45,8 @@ class SubscriptionSummaryItem(BaseModel):
     currency: str
     category: str = "Uncategorized"
     kind: str = "subscription"
+    recurring_interval: str
+    is_baseline: bool
 
 
 class CategoryTotal(BaseModel):
@@ -166,6 +168,8 @@ async def get_dashboard(
 class MonthTotal(BaseModel):
     month: str    # "2025-01"
     label: str    # "Jan"
+    baseline: float
+    on_top: float
     total: float
 
 
@@ -238,15 +242,17 @@ async def get_yearly_dashboard(
         rows = await cur.fetchall()
     items += [dict(r) for r in rows]
 
-    from backend.services.dashboard import build_yearly_totals
+    from backend.services.dashboard import build_yearly_totals_split
 
-    totals = build_yearly_totals(items, year)   # 12 values, index 0 = Jan
+    totals = build_yearly_totals_split(items, year)   # 12 dicts, index 0 = Jan
 
     months: list[MonthTotal] = [
         MonthTotal(
             month=f"{year}-{m:02d}",
             label=_cal.month_abbr[m],
-            total=totals[m - 1],
+            baseline=totals[m - 1]["baseline"],
+            on_top=totals[m - 1]["on_top"],
+            total=totals[m - 1]["total"],
         )
         for m in range(1, 13)
     ]

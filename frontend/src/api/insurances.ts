@@ -1,4 +1,4 @@
-import { get, post, put, del, postFormData, getBlob } from './client'
+import { get, post, put, patch, del, postFormData, getBlob } from './client'
 import type { Insurance, AttachmentUploadResult, HistoryEntry } from '../types'
 
 export interface InsurancePayload {
@@ -11,6 +11,7 @@ export interface InsurancePayload {
   amount: number
   currency?: string
   category_name?: string | null
+  owner_name?: string | null
   notes?: string | null
 }
 
@@ -59,4 +60,7 @@ export const insurancesApi = {
 
   getHistory: (bucketId: string, insuranceId: string) =>
     get<HistoryEntry[]>(`/buckets/${bucketId}/insurances/${insuranceId}/history`),
+
+  bulkUpdate: (bucketId: string, ids: string[], update: Partial<InsurancePayload>) =>
+    patch<{ updated: number }>(`/buckets/${bucketId}/insurances/bulk`, { ids, update }),
 }

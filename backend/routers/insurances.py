@@ -34,6 +34,7 @@ from backend.routers.subscriptions import (
     _check_bucket_access,
     _get_bucket_or_404,
     _get_or_create_category,
+    _get_or_create_owner,
 )
 from backend.services.ai_extract import (
     analyze_attachment_for_updates,
@@ -70,6 +71,7 @@ class InsuranceCreate(BaseModel):
     amount: float = 0.0
     currency: str = "EUR"
     category_name: Optional[str] = None
+    owner_name: Optional[str] = None
     notes: Optional[str] = None
 
     @field_validator("name", "insurer")
@@ -99,6 +101,7 @@ class InsuranceUpdate(BaseModel):
     amount: Optional[float] = None
     currency: Optional[str] = None
     category_name: Optional[str] = None
+    owner_name: Optional[str] = None
     notes: Optional[str] = None
 
     @field_validator("recurring_interval")
@@ -136,6 +139,7 @@ class InsuranceResponse(BaseModel):
     amount: float
     currency: str
     category_name: Optional[str] = None
+    owner_name: Optional[str] = None
     notes: Optional[str] = None
     created_at: str
     updated_at: str
@@ -187,9 +191,11 @@ async def _get_insurance_or_404(
                i.recurring_interval, i.recurring_date, i.end_date,
                i.amount, i.currency, i.notes,
                i.category_id, c.name AS category_name,
+               i.owner_id, o.name AS owner_name,
                i.created_at, i.updated_at
         FROM insurances i
         LEFT JOIN categories c ON i.category_id = c.id
+        LEFT JOIN owners o ON i.owner_id = o.id
         WHERE i.id = ? AND i.bucket_id = ?
         """,
         (insurance_id, bucket_id),
@@ -254,9 +260,11 @@ async def list_insurances(
                i.recurring_interval, i.recurring_date, i.end_date,
                i.amount, i.currency, i.notes,
                c.name AS category_name,
+               o.name AS owner_name,
                i.created_at, i.updated_at
         FROM insurances i
         LEFT JOIN categories c ON i.category_id = c.id
+        LEFT JOIN owners o ON i.owner_id = o.id
         WHERE i.bucket_id = ?
         ORDER BY i.name
         """,
@@ -306,13 +314,18 @@ async def create_insurance(
         if body.category_name
         else None
     )
+    owner_id = (
+        await _get_or_create_owner(body.owner_name, bucket_id, db)
+        if body.owner_name
+        else None
+    )
 
     async with db.execute(
         """
         INSERT INTO insurances
             (bucket_id, name, insurer, policy_number, recurring_interval,
-             recurring_date, end_date, amount, currency, category_id, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             recurring_date, end_date, amount, currency, category_id, owner_id, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id, bucket_id, name, insurer, policy_number,
                   recurring_interval, recurring_date, end_date,
                   amount, currency, notes, created_at, updated_at
@@ -328,6 +341,7 @@ async def create_insurance(
             body.amount,
             body.currency,
             category_id,
+            owner_id,
             body.notes,
         ),
     ) as cur:
@@ -335,7 +349,10 @@ async def create_insurance(
     await db.commit()
 
     return InsuranceResponse(
-        **dict(row), category_name=body.category_name, attachments=[]
+        **dict(row),
+        category_name=body.category_name,
+        owner_name=body.owner_name,
+        attachments=[],
     )
 
 
@@ -355,18 +372,19 @@ async def get_insurance(
     return InsuranceResponse(**existing, attachments=attachments)
 
 
-@router.put(
-    "/api/buckets/{bucket_id}/insurances/{insurance_id}",
-    response_model=InsuranceResponse,
-)
-async def update_insurance(
+async def _apply_insurance_update(
+    db: aiosqlite.Connection,
     bucket_id: str,
     insurance_id: str,
     body: InsuranceUpdate,
-    user: CurrentUser = Depends(get_current_user),
-    db: aiosqlite.Connection = Depends(get_db),
-) -> InsuranceResponse:
-    await _check_bucket_access(bucket_id, user, db)
+    user: CurrentUser,
+) -> None:
+    """
+    Resolve *body* against the current row, run the ``UPDATE``, and record
+    change-history rows — but does NOT commit. Shared by the single-record
+    ``PUT`` route and the bulk-update route, which both commit once
+    themselves (bulk commits once for the whole batch, not per record).
+    """
     existing = await _get_insurance_or_404(bucket_id, insurance_id, db)
 
     # Fields the client actually sent (present in the JSON body, even if the
@@ -384,6 +402,15 @@ async def update_insurance(
         )
     else:
         category_id = existing["category_id"]
+
+    if "owner_name" in fields_set:
+        owner_id = (
+            await _get_or_create_owner(body.owner_name, bucket_id, db)
+            if body.owner_name
+            else None
+        )
+    else:
+        owner_id = existing["owner_id"]
 
     updates = {
         "name": body.name if body.name is not None else existing["name"],
@@ -409,15 +436,19 @@ async def update_insurance(
         "amount": body.amount if body.amount is not None else existing["amount"],
         "currency": body.currency if body.currency is not None else existing["currency"],
         "category_id": category_id,
+        "owner_id": owner_id,
         "notes": body.notes if "notes" in fields_set else existing.get("notes"),
     }
 
     # Human-readable version of the same resolved values, for the change
-    # history log (the SQL updates above use the internal category_id FK).
+    # history log (the SQL updates above use the internal category_id/owner_id FKs).
     new_display_values = {
         **updates,
         "category_name": (
             body.category_name if "category_name" in fields_set else existing["category_name"]
+        ),
+        "owner_name": (
+            body.owner_name if "owner_name" in fields_set else existing["owner_name"]
         ),
     }
 
@@ -428,7 +459,7 @@ async def update_insurance(
             recurring_interval = :recurring_interval,
             recurring_date = :recurring_date, end_date = :end_date,
             amount = :amount, currency = :currency,
-            category_id = :category_id, notes = :notes
+            category_id = :category_id, owner_id = :owner_id, notes = :notes
         WHERE id = :id
         """,
         {**updates, "id": insurance_id},
@@ -443,11 +474,52 @@ async def update_insurance(
         fields=INSURANCE_HISTORY_FIELDS,
         user=user,
     )
+
+
+@router.put(
+    "/api/buckets/{bucket_id}/insurances/{insurance_id}",
+    response_model=InsuranceResponse,
+)
+async def update_insurance(
+    bucket_id: str,
+    insurance_id: str,
+    body: InsuranceUpdate,
+    user: CurrentUser = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+) -> InsuranceResponse:
+    await _check_bucket_access(bucket_id, user, db)
+    await _apply_insurance_update(db, bucket_id, insurance_id, body, user)
     await db.commit()
 
     refreshed = await _get_insurance_or_404(bucket_id, insurance_id, db)
     attachments = await _get_attachments(insurance_id, db)
     return InsuranceResponse(**refreshed, attachments=attachments)
+
+
+class BulkInsuranceUpdateRequest(BaseModel):
+    ids: list[str]
+    update: InsuranceUpdate
+
+
+class BulkUpdateResult(BaseModel):
+    updated: int
+
+
+@router.patch(
+    "/api/buckets/{bucket_id}/insurances/bulk",
+    response_model=BulkUpdateResult,
+)
+async def bulk_update_insurances(
+    bucket_id: str,
+    body: BulkInsuranceUpdateRequest,
+    user: CurrentUser = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+) -> BulkUpdateResult:
+    await _check_bucket_access(bucket_id, user, db)
+    for insurance_id in body.ids:
+        await _apply_insurance_update(db, bucket_id, insurance_id, body.update, user)
+    await db.commit()
+    return BulkUpdateResult(updated=len(body.ids))
 
 
 @router.delete(

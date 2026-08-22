@@ -49,6 +49,7 @@ export interface Subscription {
   currency: string
   image_url: string | null
   category_name: string | null
+  owner_name: string | null
   created_at: string
   updated_at: string
   attachments: Attachment[]
@@ -71,6 +72,7 @@ export interface Insurance {
   amount: number
   currency: string
   category_name: string | null
+  owner_name: string | null
   notes: string | null
   created_at: string
   updated_at: string
@@ -82,12 +84,19 @@ export interface Category {
   name: string
 }
 
+export interface Owner {
+  id: number
+  name: string
+}
+
 export interface SubscriptionSummaryItem {
   name: string
   monthly_amount: number
   currency: string
   category: string
   kind: 'subscription' | 'insurance'
+  recurring_interval: RecurringInterval
+  is_baseline: boolean
 }
 
 export interface CategoryTotal {
@@ -106,6 +115,8 @@ export interface MonthTotal {
   month: string
   /** "Jan" */
   label: string
+  baseline: number
+  on_top: number
   total: number
 }
 

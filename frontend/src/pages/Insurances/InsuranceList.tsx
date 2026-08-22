@@ -7,15 +7,37 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, Pencil, Shield, Paperclip } from 'lucide-react'
+import { Plus, Trash2, Pencil, Shield, Paperclip, ListChecks, X, User } from 'lucide-react'
 import { insurancesApi } from '../../api/insurances'
 import { bucketsApi } from '../../api/buckets'
 import IntervalBadge from '../../components/IntervalBadge'
 import CurrencyDisplay from '../../components/CurrencyDisplay'
 import ConfirmDialog from '../../components/ConfirmDialog'
 import BucketTabs from '../../components/BucketTabs'
+import BulkEditModal, { type BulkEditField } from '../../components/BulkEditModal'
 import InsuranceForm from './InsuranceForm'
 import type { Insurance } from '../../types'
+import { INTERVAL_LABELS } from '../../types'
+
+const BULK_FIELDS: BulkEditField[] = [
+  { key: 'name', label: 'Name', type: 'text', nullable: false },
+  { key: 'insurer', label: 'Insurer', type: 'text', nullable: false },
+  { key: 'policy_number', label: 'Policy number', type: 'text' },
+  {
+    key: 'recurring_interval',
+    label: 'Premium interval',
+    type: 'select',
+    options: Object.entries(INTERVAL_LABELS).map(([value, label]) => ({ value, label })),
+    nullable: false,
+  },
+  { key: 'recurring_date', label: 'Last payment date', type: 'date' },
+  { key: 'end_date', label: 'End date', type: 'date' },
+  { key: 'amount', label: 'Amount', type: 'number', nullable: false },
+  { key: 'currency', label: 'Currency', type: 'text', nullable: false },
+  { key: 'category_name', label: 'Category', type: 'text' },
+  { key: 'owner_name', label: 'Owner', type: 'text' },
+  { key: 'notes', label: 'Notes', type: 'text' },
+]
 
 export default function InsuranceList() {
   const { bucketId } = useParams<{ bucketId: string }>()
@@ -25,6 +47,11 @@ export default function InsuranceList() {
   const [showForm, setShowForm] = useState(false)
   const [editInsurance, setEditInsurance] = useState<Insurance | null>(null)
   const [deleteInsurance, setDeleteInsurance] = useState<Insurance | null>(null)
+
+  /** Bulk-edit "select mode" — checkboxes replace click-to-edit on rows. */
+  const [selectMode, setSelectMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [showBulkEdit, setShowBulkEdit] = useState(false)
 
   const { data: bucket } = useQuery({
     queryKey: ['bucket', bucketId],
@@ -52,6 +79,28 @@ export default function InsuranceList() {
     setEditInsurance(null)
   }
 
+  const toggleSelected = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const exitSelectMode = () => {
+    setSelectMode(false)
+    setSelectedIds(new Set())
+  }
+
+  const handleBulkApply = async (update: Record<string, string | number | null>) => {
+    if (!bucketId) return
+    await insurancesApi.bulkUpdate(bucketId, [...selectedIds], update)
+    qc.invalidateQueries({ queryKey: ['insurances', bucketId] })
+    setShowBulkEdit(false)
+    exitSelectMode()
+  }
+
   if (!bucketId) return null
 
   return (
@@ -70,6 +119,17 @@ export default function InsuranceList() {
 
         <div className="flex items-center gap-2 flex-wrap">
           <button
+            onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+            className={`flex items-center gap-2 text-sm px-3 py-2 rounded-lg border transition ${
+              selectMode
+                ? 'bg-blue-50 border-blue-300 text-blue-700'
+                : 'border-gray-200 text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            <ListChecks size={15} />
+            {selectMode ? 'Cancel select' : 'Select'}
+          </button>
+          <button
             onClick={() => setShowForm(true)}
             className="flex items-center gap-2 bg-blue-600 text-white text-sm px-4 py-2 rounded-lg hover:bg-blue-700 transition"
           >
@@ -78,6 +138,32 @@ export default function InsuranceList() {
           </button>
         </div>
       </div>
+
+      {/* ── Bulk-select bar ──────────────────────────────────────────────── */}
+      {selectMode && (
+        <div className="flex items-center justify-between gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-2.5">
+          <span className="text-sm text-blue-800">
+            {selectedIds.size} selected
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowBulkEdit(true)}
+              disabled={selectedIds.size === 0}
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition"
+            >
+              <Pencil size={13} />
+              Edit selected
+            </button>
+            <button
+              onClick={exitSelectMode}
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 transition"
+            >
+              <X size={13} />
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ── Insurance list ─────────────────────────────────────────────────── */}
       {isLoading ? (
@@ -95,13 +181,23 @@ export default function InsuranceList() {
             return (
               <div
                 key={ins.id}
-                onClick={() => setEditInsurance(ins)}
+                onClick={() => (selectMode ? toggleSelected(ins.id) : setEditInsurance(ins))}
                 className="flex items-start gap-3 px-4 py-3 hover:bg-gray-50 transition cursor-pointer"
               >
-                {/* Icon */}
-                <div className="shrink-0 mt-0.5 w-[38px] h-[38px] rounded-lg bg-blue-50 flex items-center justify-center">
-                  <Shield size={18} className="text-blue-500" />
-                </div>
+                {/* Checkbox (select mode) or icon */}
+                {selectMode ? (
+                  <input
+                    type="checkbox"
+                    checked={selectedIds.has(ins.id)}
+                    onChange={() => toggleSelected(ins.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    className="shrink-0 mt-2.5"
+                  />
+                ) : (
+                  <div className="shrink-0 mt-0.5 w-[38px] h-[38px] rounded-lg bg-blue-50 flex items-center justify-center">
+                    <Shield size={18} className="text-blue-500" />
+                  </div>
+                )}
 
                 <div className="flex-1 min-w-0">
                   {/* Row 1 — Name + Amount */}
@@ -129,6 +225,12 @@ export default function InsuranceList() {
                       {ins.category_name && (
                         <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
                           {ins.category_name}
+                        </span>
+                      )}
+                      {ins.owner_name && (
+                        <span className="inline-flex items-center gap-1 text-xs bg-violet-50 text-violet-600 px-2 py-0.5 rounded-full">
+                          <User size={11} />
+                          {ins.owner_name}
                         </span>
                       )}
                       {ins.end_date && (
@@ -192,6 +294,15 @@ export default function InsuranceList() {
           confirmLabel="Delete"
           onConfirm={() => deleteMut.mutate(deleteInsurance.id)}
           onCancel={() => setDeleteInsurance(null)}
+        />
+      )}
+
+      {showBulkEdit && (
+        <BulkEditModal
+          count={selectedIds.size}
+          fields={BULK_FIELDS}
+          onApply={handleBulkApply}
+          onCancel={() => setShowBulkEdit(false)}
         />
       )}
     </div>

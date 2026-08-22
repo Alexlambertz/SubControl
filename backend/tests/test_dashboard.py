@@ -218,6 +218,20 @@ class TestDashboardEndpoint:
         names = [s["name"] for s in resp.json()["subscriptions"]]
         assert "Annual" not in names
 
+    async def test_is_baseline_flags_monthly_vs_non_monthly(
+        self, client: AsyncClient
+    ) -> None:
+        bid = await _make_bucket(client, "DashBaselineFlag")
+        await _make_sub(client, bid, name="Monthly", interval="monthly", amount=10.0)
+        await _make_sub(client, bid, name="Yearly", interval="yearly", amount=120.0)
+
+        resp = await client.get("/api/dashboard?mode=average")
+        by_name = {s["name"]: s for s in resp.json()["subscriptions"]}
+        assert by_name["Monthly"]["is_baseline"] is True
+        assert by_name["Monthly"]["recurring_interval"] == "monthly"
+        assert by_name["Yearly"]["is_baseline"] is False
+        assert by_name["Yearly"]["recurring_interval"] == "yearly"
+
     async def test_filter_by_bucket(self, client: AsyncClient) -> None:
         bid_a = await _make_bucket(client, "DashBucketA")
         bid_b = await _make_bucket(client, "DashBucketB")
@@ -491,6 +505,33 @@ class TestYearlyDashboardEndpoint:
             assert months[label] == pytest.approx(0.0), (
                 f"{label} expected 0.0, got {months[label]}"
             )
+
+    async def test_baseline_on_top_sum_to_total(self, client: AsyncClient) -> None:
+        """A monthly sub contributes to baseline; a yearly sub contributes to
+        on_top only in its anniversary month; baseline + on_top must always
+        foot to the existing total figure."""
+        bid = await _make_bucket(client, "YearlyBaselineSplit")
+        await _make_sub(
+            client, bid, name="Netflix",
+            interval="monthly", recurring_date="2024-12-15", amount=9.99,
+        )
+        await _make_sub(
+            client, bid, name="Adobe",
+            interval="yearly", recurring_date="2024-06-01", amount=60.0,
+        )
+        resp = await client.get("/api/dashboard/yearly?year=2025")
+        months = resp.json()["months"]
+
+        for m in months:
+            assert m["baseline"] + m["on_top"] == pytest.approx(m["total"])
+            assert m["baseline"] == pytest.approx(9.99)
+
+        by_label = {m["label"]: m for m in months}
+        assert by_label["Jun"]["on_top"] == pytest.approx(60.0)
+        assert by_label["Jun"]["total"] == pytest.approx(69.99)
+        for label in ["Jan", "Feb", "Mar", "Apr", "May",
+                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]:
+            assert by_label[label]["on_top"] == pytest.approx(0.0)
 
     async def test_year_param_required(self, client: AsyncClient) -> None:
         resp = await client.get("/api/dashboard/yearly")

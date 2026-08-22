@@ -1,4 +1,4 @@
-import { get, post, put, del, postFormData, getBlob } from './client'
+import { get, post, put, patch, del, postFormData, getBlob } from './client'
 import type { Subscription, ImportResult, AttachmentUploadResult, HistoryEntry } from '../types'
 
 export interface SubscriptionPayload {
@@ -10,6 +10,7 @@ export interface SubscriptionPayload {
   amount: number
   currency?: string
   category_name?: string | null
+  owner_name?: string | null
 }
 
 export const subscriptionsApi = {
@@ -82,4 +83,7 @@ export const subscriptionsApi = {
 
   getHistory: (bucketId: string, subId: string) =>
     get<HistoryEntry[]>(`/buckets/${bucketId}/subscriptions/${subId}/history`),
+
+  bulkUpdate: (bucketId: string, ids: string[], update: Partial<SubscriptionPayload>) =>
+    patch<{ updated: number }>(`/buckets/${bucketId}/subscriptions/bulk`, { ids, update }),
 }

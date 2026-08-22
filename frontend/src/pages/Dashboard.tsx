@@ -13,6 +13,9 @@ import { dashboardApi } from '../api/dashboard'
 import { bucketsApi } from '../api/buckets'
 import CurrencyDisplay from '../components/CurrencyDisplay'
 import MonthPicker from '../components/MonthPicker'
+import IntervalBadge from '../components/IntervalBadge'
+import SortableTable, { type Column } from '../components/SortableTable'
+import type { SubscriptionSummaryItem } from '../types'
 
 const COLORS = [
   '#3b82f6', '#10b981', '#f59e0b', '#ef4444',
@@ -119,14 +122,26 @@ export default function Dashboard() {
 
           {/* ── Yearly overview chart ────────────────────────────────────── */}
           <div className="bg-white rounded-2xl border border-gray-200 p-6">
-            <div className="flex items-center gap-2 mb-1">
-              <CalendarDays size={16} className="text-blue-500" />
-              <h2 className="text-base font-semibold text-gray-800">
-                Real costs · {year}
-              </h2>
+            <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <CalendarDays size={16} className="text-blue-500" />
+                <h2 className="text-base font-semibold text-gray-800">
+                  Real costs · {year}
+                </h2>
+              </div>
+              <div className="flex items-center gap-3 text-xs">
+                <span className="inline-flex items-center gap-1.5 text-gray-500">
+                  <span className="w-2 h-2 rounded-full bg-blue-500" />
+                  Baseline
+                </span>
+                <span className="inline-flex items-center gap-1.5 text-gray-500">
+                  <span className="w-2 h-2 rounded-full bg-amber-500" />
+                  On top
+                </span>
+              </div>
             </div>
             <p className="text-xs text-gray-400 mb-5">
-              Actual payments due each month based on billing cycles.
+              Baseline is recurring monthly spend; on-top is non-monthly charges landing that month.
             </p>
 
             {yearlyLoading ? (
@@ -140,9 +155,13 @@ export default function Dashboard() {
                   margin={{ top: 8, right: 16, left: 0, bottom: 0 }}
                 >
                   <defs>
-                    <linearGradient id="yearGradient" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.25} />
-                      <stop offset="95%" stopColor="#3b82f6" stopOpacity={0.02} />
+                    <linearGradient id="baselineGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%"  stopColor="#3b82f6" stopOpacity={0.35} />
+                      <stop offset="95%" stopColor="#3b82f6" stopOpacity={0.05} />
+                    </linearGradient>
+                    <linearGradient id="onTopGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%"  stopColor="#f59e0b" stopOpacity={0.35} />
+                      <stop offset="95%" stopColor="#f59e0b" stopOpacity={0.05} />
                     </linearGradient>
                   </defs>
 
@@ -182,7 +201,10 @@ export default function Dashboard() {
                   />
 
                   <Tooltip
-                    formatter={(value) => [fmtEur(Number(value)), 'Total']}
+                    formatter={(value, name) => [
+                      fmtEur(Number(value)),
+                      name === 'baseline' ? 'Baseline' : name === 'on_top' ? 'On top' : 'Total',
+                    ]}
                     contentStyle={{
                       borderRadius: '10px',
                       border: '1px solid #e5e7eb',
@@ -202,32 +224,21 @@ export default function Dashboard() {
 
                   <Area
                     type="monotone"
-                    dataKey="total"
+                    dataKey="baseline"
+                    stackId="1"
                     stroke="#3b82f6"
                     strokeWidth={2}
-                    fill="url(#yearGradient)"
-                    dot={(props: unknown) => {
-                      const { cx, cy, payload } = props as { cx: number; cy: number; payload: { month: string; label: string } }
-                      const isSelected = payload.label === selectedMonthLabel
-                      return (
-                        <g
-                          key={payload.month}
-                          style={{ cursor: 'pointer' }}
-                          onClick={() => handleMonthChange(payload.month)}
-                        >
-                          {/* Transparent hit area */}
-                          <circle cx={cx} cy={cy} r={14} fill="transparent" />
-                          <circle
-                            cx={cx} cy={cy}
-                            r={isSelected ? 5 : 3}
-                            fill={isSelected ? '#2563eb' : '#3b82f6'}
-                            stroke="#fff"
-                            strokeWidth={isSelected ? 2 : 1}
-                          />
-                        </g>
-                      )
-                    }}
-                    activeDot={{ r: 6, fill: '#2563eb', stroke: '#fff', strokeWidth: 2 }}
+                    fill="url(#baselineGradient)"
+                    activeDot={{ r: 5, fill: '#2563eb', stroke: '#fff', strokeWidth: 2 }}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="on_top"
+                    stackId="1"
+                    stroke="#f59e0b"
+                    strokeWidth={2}
+                    fill="url(#onTopGradient)"
+                    activeDot={{ r: 5, fill: '#d97706', stroke: '#fff', strokeWidth: 2 }}
                   />
                 </AreaChart>
               </ResponsiveContainer>
@@ -314,9 +325,62 @@ export default function Dashboard() {
               const visible = selectedCategory
                 ? summary.subscriptions.filter((s) => s.category === selectedCategory)
                 : summary.subscriptions
-              return visible.length > 0 ? (
+              if (visible.length === 0) return null
+
+              const baselineTotal = visible
+                .filter((s) => s.is_baseline)
+                .reduce((sum, s) => sum + s.monthly_amount, 0)
+              const onTopTotal = visible
+                .filter((s) => !s.is_baseline)
+                .reduce((sum, s) => sum + s.monthly_amount, 0)
+
+              const columns: Column<SubscriptionSummaryItem>[] = [
+                {
+                  key: 'name',
+                  label: 'Name',
+                  render: (s) => (
+                    <span className="inline-flex items-center gap-1.5">
+                      {s.kind === 'insurance' && (
+                        <Shield size={13} className="text-blue-400 shrink-0" />
+                      )}
+                      {s.name}
+                    </span>
+                  ),
+                },
+                {
+                  key: 'recurring_interval',
+                  label: 'Interval',
+                  render: (s) => <IntervalBadge interval={s.recurring_interval} />,
+                },
+                {
+                  key: 'is_baseline',
+                  label: 'Type',
+                  render: (s) => (
+                    <span
+                      className={`text-xs px-2 py-0.5 rounded-full border ${
+                        s.is_baseline
+                          ? 'bg-blue-50 text-blue-600 border-blue-200'
+                          : 'bg-amber-50 text-amber-600 border-amber-200'
+                      }`}
+                    >
+                      {s.is_baseline ? 'Baseline' : 'On top'}
+                    </span>
+                  ),
+                },
+                {
+                  key: 'monthly_amount',
+                  label: 'Monthly amount',
+                  render: (s) => (
+                    <span className="font-medium">
+                      <CurrencyDisplay amount={s.monthly_amount} currency={s.currency} />
+                    </span>
+                  ),
+                },
+              ]
+
+              return (
                 <div className="bg-white rounded-2xl border border-gray-200 p-6">
-                  <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
                     <h2 className="text-base font-semibold text-gray-800">
                       Subscriptions
                       {selectedCategory && (
@@ -325,36 +389,25 @@ export default function Dashboard() {
                         </span>
                       )}
                     </h2>
+                    <div className="flex items-center gap-3 text-xs">
+                      <span className="inline-flex items-center gap-1.5 text-gray-500">
+                        <span className="w-2 h-2 rounded-full bg-blue-500" />
+                        Baseline: {fmtEur(baselineTotal)}
+                      </span>
+                      <span className="inline-flex items-center gap-1.5 text-gray-500">
+                        <span className="w-2 h-2 rounded-full bg-amber-500" />
+                        On top: {fmtEur(onTopTotal)}
+                      </span>
+                    </div>
                   </div>
-                  <div className="overflow-x-auto">
-                  <table className="min-w-full text-sm divide-y divide-gray-100">
-                    <thead>
-                      <tr className="text-gray-500 text-xs uppercase">
-                        <th className="text-left py-2 pr-4">Name</th>
-                        <th className="text-right py-2">Monthly amount</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-50">
-                      {visible.map((s, i) => (
-                        <tr key={i}>
-                          <td className="py-2 pr-4 text-gray-700">
-                            <span className="inline-flex items-center gap-1.5">
-                              {s.kind === 'insurance' && (
-                                <Shield size={13} className="text-blue-400 shrink-0" />
-                              )}
-                              {s.name}
-                            </span>
-                          </td>
-                          <td className="py-2 text-right font-medium">
-                            <CurrencyDisplay amount={s.monthly_amount} currency={s.currency} />
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  </div>
+                  <SortableTable
+                    columns={columns}
+                    data={visible}
+                    rowKey={(s) => `${s.kind}:${s.name}:${s.category}:${s.monthly_amount}`}
+                    defaultSort={{ key: 'name', dir: 'asc' }}
+                  />
                 </div>
-              ) : null
+              )
             })()}
         </>
       ) : null}

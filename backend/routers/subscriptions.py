@@ -68,6 +68,7 @@ class SubscriptionCreate(BaseModel):
     amount: float = 0.0
     currency: str = "EUR"
     category_name: Optional[str] = None
+    owner_name: Optional[str] = None
 
     @field_validator("name")
     @classmethod
@@ -95,6 +96,7 @@ class SubscriptionUpdate(BaseModel):
     amount: Optional[float] = None
     currency: Optional[str] = None
     category_name: Optional[str] = None
+    owner_name: Optional[str] = None
     image_url: Optional[str] = None
 
     @field_validator("recurring_interval")
@@ -132,6 +134,7 @@ class SubscriptionResponse(BaseModel):
     currency: str
     image_url: Optional[str] = None
     category_name: Optional[str] = None
+    owner_name: Optional[str] = None
     created_at: str
     updated_at: str
     attachments: list[AttachmentResponse] = []
@@ -172,10 +175,12 @@ async def _get_sub_or_404(
                s.recurring_interval, s.recurring_date, s.end_date,
                s.amount, s.currency, s.image_url,
                s.category_id, c.name AS category_name,
+               s.owner_id, o.name AS owner_name,
                s.created_at, s.updated_at
         FROM subscriptions s
         LEFT JOIN providers p ON s.provider_id = p.id
         LEFT JOIN categories c ON s.category_id = c.id
+        LEFT JOIN owners o ON s.owner_id = o.id
         WHERE s.id = ? AND s.bucket_id = ?
         """,
         (sub_id, bucket_id),
@@ -253,6 +258,25 @@ async def _get_or_create_category(
     return row["id"]
 
 
+async def _get_or_create_owner(
+    name: str, bucket_id: str, db: aiosqlite.Connection
+) -> int:
+    """Return the owner ID within *bucket_id*, creating it if it doesn't exist."""
+    async with db.execute(
+        "SELECT id FROM owners WHERE bucket_id = ? AND name = ?", (bucket_id, name)
+    ) as cur:
+        row = await cur.fetchone()
+    if row:
+        return row["id"]
+    async with db.execute(
+        "INSERT INTO owners (bucket_id, name) VALUES (?, ?) RETURNING id",
+        (bucket_id, name),
+    ) as cur:
+        row = await cur.fetchone()
+    await db.commit()
+    return row["id"]
+
+
 async def _update_logo(sub_id: str, provider_name: str, db_path: str) -> None:
     """
     Background task: fetch logo for *provider_name* and persist in *sub_id*.
@@ -293,10 +317,12 @@ async def list_subscriptions(
                s.recurring_interval, s.recurring_date, s.end_date,
                s.amount, s.currency, s.image_url,
                c.name AS category_name,
+               o.name AS owner_name,
                s.created_at, s.updated_at
         FROM subscriptions s
         LEFT JOIN providers p ON s.provider_id = p.id
         LEFT JOIN categories c ON s.category_id = c.id
+        LEFT JOIN owners o ON s.owner_id = o.id
         WHERE s.bucket_id = ?
         ORDER BY s.name
         """,
@@ -347,13 +373,18 @@ async def create_subscription(
         if body.category_name
         else None
     )
+    owner_id = (
+        await _get_or_create_owner(body.owner_name, bucket_id, db)
+        if body.owner_name
+        else None
+    )
 
     async with db.execute(
         """
         INSERT INTO subscriptions
             (bucket_id, name, provider_id, recurring_interval, recurring_date,
-             end_date, amount, currency, category_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             end_date, amount, currency, category_id, owner_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id, bucket_id, name, recurring_interval, recurring_date,
                   end_date, amount, currency, image_url, created_at, updated_at
         """,
@@ -367,6 +398,7 @@ async def create_subscription(
             body.amount,
             body.currency,
             category_id,
+            owner_id,
         ),
     ) as cur:
         row = await cur.fetchone()
@@ -384,6 +416,7 @@ async def create_subscription(
         **dict(row),
         provider_name=body.provider_name,
         category_name=body.category_name,
+        owner_name=body.owner_name,
     )
 
 
@@ -403,18 +436,19 @@ async def get_subscription(
     return SubscriptionResponse(**existing, attachments=attachments)
 
 
-@router.put(
-    "/api/buckets/{bucket_id}/subscriptions/{sub_id}",
-    response_model=SubscriptionResponse,
-)
-async def update_subscription(
+async def _apply_subscription_update(
+    db: aiosqlite.Connection,
     bucket_id: str,
     sub_id: str,
     body: SubscriptionUpdate,
-    user: CurrentUser = Depends(get_current_user),
-    db: aiosqlite.Connection = Depends(get_db),
-) -> SubscriptionResponse:
-    await _check_bucket_access(bucket_id, user, db)
+    user: CurrentUser,
+) -> None:
+    """
+    Resolve *body* against the current row, run the ``UPDATE``, and record
+    change-history rows — but does NOT commit. Shared by the single-record
+    ``PUT`` route and the bulk-update route, which both commit once
+    themselves (bulk commits once for the whole batch, not per record).
+    """
     existing = await _get_sub_or_404(bucket_id, sub_id, db)
 
     # Fields the client actually sent (present in the JSON body, even if the
@@ -443,6 +477,16 @@ async def update_subscription(
     else:
         category_id = existing["category_id"]
 
+    # Resolve owner — same pattern, but bucket-scoped.
+    if "owner_name" in fields_set:
+        owner_id: Optional[int] = (
+            await _get_or_create_owner(body.owner_name, bucket_id, db)
+            if body.owner_name
+            else None
+        )
+    else:
+        owner_id = existing["owner_id"]
+
     updates = {
         "name": body.name if body.name is not None else existing["name"],
         "provider_id": provider_id,
@@ -464,6 +508,7 @@ async def update_subscription(
         "amount": body.amount if body.amount is not None else existing["amount"],
         "currency": body.currency if body.currency is not None else existing["currency"],
         "category_id": category_id,
+        "owner_id": owner_id,
         "image_url": body.image_url if body.image_url is not None else existing.get("image_url"),
     }
 
@@ -482,6 +527,9 @@ async def update_subscription(
         "category_name": (
             body.category_name if "category_name" in fields_set else existing["category_name"]
         ),
+        "owner_name": (
+            body.owner_name if "owner_name" in fields_set else existing["owner_name"]
+        ),
     }
 
     await db.execute(
@@ -491,7 +539,7 @@ async def update_subscription(
             recurring_interval = :recurring_interval,
             recurring_date = :recurring_date, end_date = :end_date,
             amount = :amount, currency = :currency,
-            category_id = :category_id, image_url = :image_url
+            category_id = :category_id, owner_id = :owner_id, image_url = :image_url
         WHERE id = :id
         """,
         {**updates, "id": sub_id},
@@ -506,7 +554,6 @@ async def update_subscription(
         fields=SUBSCRIPTION_HISTORY_FIELDS,
         user=user,
     )
-    await db.commit()
 
     # Fire-and-forget logo refresh if provider changed
     if body.provider_name is not None:
@@ -515,9 +562,51 @@ async def update_subscription(
             _update_logo(sub_id, body.provider_name, get_db_path())
         )
 
+
+@router.put(
+    "/api/buckets/{bucket_id}/subscriptions/{sub_id}",
+    response_model=SubscriptionResponse,
+)
+async def update_subscription(
+    bucket_id: str,
+    sub_id: str,
+    body: SubscriptionUpdate,
+    user: CurrentUser = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+) -> SubscriptionResponse:
+    await _check_bucket_access(bucket_id, user, db)
+    await _apply_subscription_update(db, bucket_id, sub_id, body, user)
+    await db.commit()
+
     refreshed = await _get_sub_or_404(bucket_id, sub_id, db)
     attachments = await _get_attachments(sub_id, db)
     return SubscriptionResponse(**refreshed, attachments=attachments)
+
+
+class BulkSubscriptionUpdateRequest(BaseModel):
+    ids: list[str]
+    update: SubscriptionUpdate
+
+
+class BulkUpdateResult(BaseModel):
+    updated: int
+
+
+@router.patch(
+    "/api/buckets/{bucket_id}/subscriptions/bulk",
+    response_model=BulkUpdateResult,
+)
+async def bulk_update_subscriptions(
+    bucket_id: str,
+    body: BulkSubscriptionUpdateRequest,
+    user: CurrentUser = Depends(get_current_user),
+    db: aiosqlite.Connection = Depends(get_db),
+) -> BulkUpdateResult:
+    await _check_bucket_access(bucket_id, user, db)
+    for sub_id in body.ids:
+        await _apply_subscription_update(db, bucket_id, sub_id, body.update, user)
+    await db.commit()
+    return BulkUpdateResult(updated=len(body.ids))
 
 
 @router.delete(

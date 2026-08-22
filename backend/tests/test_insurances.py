@@ -326,6 +326,110 @@ class TestInsuranceHistory:
         assert row["n"] == 0
 
 
+class TestBulkUpdateInsurances:
+    async def test_bulk_update_applies_field_to_all(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "BulkInsBucket")
+        ins1 = await _create_insurance(client, bid, name="Ins1", amount=5.0)
+        ins2 = await _create_insurance(client, bid, name="Ins2", amount=7.0)
+
+        resp = await client.patch(
+            f"/api/buckets/{bid}/insurances/bulk",
+            json={"ids": [ins1["id"], ins2["id"]], "update": {"amount": 19.99}},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["updated"] == 2
+
+        for ins_id in (ins1["id"], ins2["id"]):
+            get_resp = await client.get(f"/api/buckets/{bid}/insurances/{ins_id}")
+            assert get_resp.json()["amount"] == pytest.approx(19.99)
+
+    async def test_bulk_update_only_touches_specified_fields(
+        self, client: AsyncClient
+    ) -> None:
+        bid = await _create_bucket(client, "BulkInsPartialBucket")
+        ins = await _create_insurance(client, bid, name="Untouched", amount=5.0)
+
+        resp = await client.patch(
+            f"/api/buckets/{bid}/insurances/bulk",
+            json={"ids": [ins["id"]], "update": {"amount": 42.0}},
+        )
+        assert resp.status_code == 200
+
+        get_resp = await client.get(f"/api/buckets/{bid}/insurances/{ins['id']}")
+        body = get_resp.json()
+        assert body["amount"] == pytest.approx(42.0)
+        assert body["name"] == "Untouched"
+
+    async def test_bulk_update_explicit_null_clears_field(
+        self, client: AsyncClient
+    ) -> None:
+        bid = await _create_bucket(client, "BulkInsClearBucket")
+        ins = await _create_insurance(client, bid, policy_number="POL-1")
+        assert ins["policy_number"] == "POL-1"
+
+        resp = await client.patch(
+            f"/api/buckets/{bid}/insurances/bulk",
+            json={"ids": [ins["id"]], "update": {"policy_number": None}},
+        )
+        assert resp.status_code == 200
+
+        get_resp = await client.get(f"/api/buckets/{bid}/insurances/{ins['id']}")
+        assert get_resp.json()["policy_number"] is None
+
+    async def test_bulk_update_records_history_per_record(
+        self, client: AsyncClient
+    ) -> None:
+        bid = await _create_bucket(client, "BulkInsHistoryBucket")
+        ins1 = await _create_insurance(client, bid, name="A", amount=5.0)
+        ins2 = await _create_insurance(client, bid, name="B", amount=5.0)
+
+        await client.patch(
+            f"/api/buckets/{bid}/insurances/bulk",
+            json={"ids": [ins1["id"], ins2["id"]], "update": {"amount": 9.0}},
+        )
+
+        for ins_id in (ins1["id"], ins2["id"]):
+            hist_resp = await client.get(
+                f"/api/buckets/{bid}/insurances/{ins_id}/history"
+            )
+            entries = hist_resp.json()
+            assert len(entries) == 1
+            assert entries[0]["field"] == "amount"
+            assert entries[0]["old_value"] == "5.0"
+            assert entries[0]["new_value"] == "9.0"
+
+    async def test_bulk_update_owner_name(self, client: AsyncClient) -> None:
+        bid = await _create_bucket(client, "BulkInsOwnerBucket")
+        ins = await _create_insurance(client, bid)
+
+        resp = await client.patch(
+            f"/api/buckets/{bid}/insurances/bulk",
+            json={"ids": [ins["id"]], "update": {"owner_name": "Alex"}},
+        )
+        assert resp.status_code == 200
+
+        get_resp = await client.get(f"/api/buckets/{bid}/insurances/{ins['id']}")
+        assert get_resp.json()["owner_name"] == "Alex"
+
+    async def test_bulk_update_rejects_id_from_another_bucket(
+        self, client: AsyncClient
+    ) -> None:
+        bid1 = await _create_bucket(client, "BulkInsCrossA")
+        bid2 = await _create_bucket(client, "BulkInsCrossB")
+        ins_in_other_bucket = await _create_insurance(client, bid2, amount=5.0)
+
+        resp = await client.patch(
+            f"/api/buckets/{bid1}/insurances/bulk",
+            json={"ids": [ins_in_other_bucket["id"]], "update": {"amount": 99.0}},
+        )
+        assert resp.status_code == 404
+
+        get_resp = await client.get(
+            f"/api/buckets/{bid2}/insurances/{ins_in_other_bucket['id']}"
+        )
+        assert get_resp.json()["amount"] == pytest.approx(5.0)
+
+
 # ---------------------------------------------------------------------------
 # Tests: Attachments
 # ---------------------------------------------------------------------------

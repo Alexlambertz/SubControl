@@ -131,7 +131,7 @@ class TestClosedFormEdgeCases:
         assert expected is not None
 
     def test_yearly_totals_unaffected(self):
-        """build_yearly_totals (which drives the dashboard yearly chart)
+        """build_yearly_totals_split (which drives the dashboard yearly chart)
         must produce identical totals before/after the rewrite."""
         subs = [
             {
@@ -149,9 +149,9 @@ class TestClosedFormEdgeCases:
                 "end_date": "2026-06-01",
             },
         ]
-        totals = dash.build_yearly_totals(subs, 2026)
+        totals = dash.build_yearly_totals_split(subs, 2026)
         assert len(totals) == 12
-        assert all(t >= 0 for t in totals)
+        assert all(t["total"] >= 0 for t in totals)
         # Every month should have exactly amount*[days in month] for the daily sub
         # (occurs every single day) plus whatever weekly occurrences land there.
-        assert totals[0] > 0  # January has occurrences of both subs (before end_date)
+        assert totals[0]["total"] > 0  # January has occurrences of both subs (before end_date)

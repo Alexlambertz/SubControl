@@ -275,9 +275,12 @@ def any_occurrence_in_month(
     return due
 
 
-def build_yearly_totals(subscriptions: list[dict], year: int) -> list[float]:
+def build_yearly_totals_split(subscriptions: list[dict], year: int) -> list[dict]:
     """
-    Compute the real-cost total for each of the 12 months in *year*.
+    Compute the real-cost total for each of the 12 months in *year*, split
+    into a ``baseline`` (monthly-interval subscriptions, which recur every
+    month) and an ``on_top`` figure (everything else — yearly/quarterly/etc.
+    charges landing as spikes in the specific months they're due).
 
     Uses :func:`any_occurrence_in_month` when an explicit ``recurring_date``
     is set (``recurring_date`` = last payment date), so the subscription appears
@@ -290,9 +293,11 @@ def build_yearly_totals(subscriptions: list[dict], year: int) -> list[float]:
 
     Returns
     -------
-    A list of 12 rounded totals, index 0 = January … index 11 = December.
+    A list of 12 ``{baseline, on_top, total}`` dicts, index 0 = January …
+    index 11 = December.
     """
-    totals = [0.0] * 12
+    baseline = [0.0] * 12
+    on_top = [0.0] * 12
     for sub in subscriptions:
         recurring_date = sub.get("recurring_date")
         end_date = sub.get("end_date") or None
@@ -306,11 +311,19 @@ def build_yearly_totals(subscriptions: list[dict], year: int) -> list[float]:
             anchor = created[:10]
             find = due_date_in_month     # forward-only: sub didn't exist before creation
 
+        bucket = baseline if sub["recurring_interval"] == "monthly" else on_top
         for m in range(1, 13):
             if find(anchor, sub["recurring_interval"], year, m, end_date=end_date):
-                totals[m - 1] += sub["amount"]
+                bucket[m - 1] += sub["amount"]
 
-    return [round(t, 2) for t in totals]
+    return [
+        {
+            "baseline": round(baseline[m], 2),
+            "on_top": round(on_top[m], 2),
+            "total": round(baseline[m] + on_top[m], 2),
+        }
+        for m in range(12)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +379,8 @@ def build_average_summary(
                 "currency": sub["currency"],
                 "category": cat,
                 "kind": sub.get("kind", "subscription"),
+                "recurring_interval": sub["recurring_interval"],
+                "is_baseline": sub["recurring_interval"] == "monthly",
             }
         )
         by_cat[cat] = by_cat.get(cat, 0.0) + monthly
@@ -419,6 +434,8 @@ def build_real_summary(subscriptions: list[dict], year: int, month: int) -> dict
                     "currency": sub["currency"],
                     "category": cat,
                     "kind": sub.get("kind", "subscription"),
+                    "recurring_interval": sub["recurring_interval"],
+                    "is_baseline": sub["recurring_interval"] == "monthly",
                 }
             )
             by_cat[cat] = by_cat.get(cat, 0.0) + sub["amount"]
