@@ -118,6 +118,35 @@ async def require_admin(user: CurrentUser = Depends(get_current_user)) -> Curren
 # ---------------------------------------------------------------------------
 
 _jwks_cache: Optional[dict] = None
+_oidc_metadata: Optional[dict] = None
+
+
+async def get_oidc_metadata() -> dict:
+    """Return the provider's OIDC discovery document (cached).
+
+    Works with any compliant provider (authentik, Keycloak, ...) instead of
+    assuming Keycloak's /protocol/openid-connect/* paths.  Falls back to the
+    Keycloak layout if discovery is unavailable.
+    """
+    import httpx
+
+    global _oidc_metadata
+    if _oidc_metadata is None:
+        issuer = settings.oidc_issuer_url.rstrip("/")
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{issuer}/.well-known/openid-configuration", timeout=5
+                )
+                resp.raise_for_status()
+                _oidc_metadata = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OIDC discovery failed (%s); using Keycloak paths", exc)
+            return {
+                "jwks_uri": f"{issuer}/protocol/openid-connect/certs",
+                "token_endpoint": f"{issuer}/protocol/openid-connect/token",
+            }
+    return _oidc_metadata
 
 
 async def _validate_jwt(token: str) -> CurrentUser:
@@ -135,7 +164,7 @@ async def _validate_jwt(token: str) -> CurrentUser:
     try:
         # Fetch JWKS if not cached
         if _jwks_cache is None:
-            jwks_url = f"{settings.oidc_issuer_url}/protocol/openid-connect/certs"
+            jwks_url = (await get_oidc_metadata())["jwks_uri"]
             async with httpx.AsyncClient() as client:
                 resp = await client.get(jwks_url, timeout=5)
                 resp.raise_for_status()
@@ -177,7 +206,10 @@ async def _validate_jwt(token: str) -> CurrentUser:
             username=payload.get("preferred_username", payload.get("sub", "")),
             # JWT claim used only as fallback; DB value takes precedence in
             # get_current_user after this function returns.
-            is_admin="admin" in payload.get("realm_access", {}).get("roles", []),
+            is_admin=(
+                "admin" in payload.get("realm_access", {}).get("roles", [])
+                or "admin" in (payload.get("roles") or [])
+            ),
         )
 
     except JWTError as exc:

@@ -24,7 +24,7 @@ from pydantic import BaseModel
 import aiosqlite
 from backend.config import settings
 from backend.database import get_db
-from backend.dependencies import CurrentUser, get_current_user
+from backend.dependencies import CurrentUser, get_current_user, get_oidc_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -143,9 +143,7 @@ async def exchange_code(body: CodeExchangeRequest) -> dict:
 
     Works for both public clients (no secret) and confidential clients.
     """
-    token_url = (
-        f"{settings.oidc_issuer_url}/protocol/openid-connect/token"
-    )
+    token_url = (await get_oidc_metadata())["token_endpoint"]
 
     form: dict[str, str] = {
         "grant_type": "authorization_code",
@@ -205,7 +203,7 @@ async def refresh_token(body: RefreshRequest) -> dict:
     Called by the frontend when the access token is about to expire or
     has expired. The client_secret is added server-side when required.
     """
-    token_url = f"{settings.oidc_issuer_url}/protocol/openid-connect/token"
+    token_url = (await get_oidc_metadata())["token_endpoint"]
 
     form: dict[str, str] = {
         "grant_type": "refresh_token",
